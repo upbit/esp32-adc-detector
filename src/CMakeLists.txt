@@ -1,1 +1,4 @@
-idf_component_register(SRCS "main.c" REQUIRES led_strip esp_driver_gpio esp_timer)
+idf_component_register(SRCS "main.c" "starchart.c" "starchart_render.c" "chart_hardware.c"
+    INCLUDE_DIRS "../include"
+    REQUIRES esp_driver_gpio esp_driver_spi esp_driver_i2c esp_timer esp_wifi
+             esp_event esp_netif nvs_flash)

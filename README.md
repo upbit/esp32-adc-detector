@@ -1,8 +1,16 @@
 # esp32-adc-detector
 
-基于 ESP32-C5 的信号探测项目，当前阶段为最小硬件测试。识别方案采用 Espressif 提供 Wi‑Fi 混杂模式接收回调；BLE 扫描结果也直接包含设备地址、地址类型和 RSSI。
+基于 ESP32-C5 的单屏信源星盘原型，沿用 PlatformIO + ESP-IDF 5.5.5。MPU6050 提供相对偏航，ST7796 SPI 屏显示固定天线与反向旋转的历史弧带；真实模式锁定一个 Wi-Fi AP 的 Beacon RSSI，不关联网络。本版不包含 BLE、信源列表或距离估算。
 
-![UI Design](docs/UI_Design.png)
+![LCD UI Design](docs/UI_Design.png)
+
+实现要求见 [星盘 UI V1](docs/星盘UI_V1_AI实现要求.md)，配置与完整调试流程见 [原型说明](docs/starchart-prototype.md)。
+
+以下为设备端共用 RGB565 渲染器输出的模拟预览，不是实机照片：
+
+![Star Chart Simulation](docs/preview/starchart-sim.png)
+
+[旋转与停止采样动画](docs/preview/starchart-sim.gif) · [等待信号状态](docs/preview/starchart-wait.png)
 
 ## 硬件
 
@@ -19,9 +27,9 @@
 
 ![MP6050 Pinout](docs/MP6050-pinout.png)
 
-### TFT 液晶屏
+### LCD (TK015F4000)
 
-- 液晶屏分辨率 320x320
+The TK015F4000 is a 1.54-inch 320×320 resolution SPI IPS display module driven by the ST7796 controller chip, which can be interfaced with an ESP32 microcontroller and the LVGL (Light and Versatile Graphics Library) framework.
 
 ![TFT Board Pinout](docs/TFT-pinout-320x320.png)
 
@@ -39,7 +47,7 @@
 | CS | **左侧 GPIO10** | 屏幕片选 |
 | GND | **左侧 GND** | 地 |
 | 3V3 | **左侧 3V3** | 模块供电 |
-| BL | 预留不接 | 不要直接用 GPIO 提供原图标注的约 80 mA 背光电流 |
+| BL | 不接 | 如果要控制背光，可接左侧 GPIO0 |
 | 无标记脚 | 暂不接 | NA |
 
 GPIO8、9、6、10 都在左侧相邻区域，接线比较集中。GPIO8、9 通过 GPIO 矩阵配置为 MOSI、DC 即可，不需要拘泥于开发板图上的默认复用功能。
@@ -81,3 +89,27 @@ pio device monitor --port /dev/cu.usbmodem101
 ```
 
 串口以 `pio device list` 为准。
+
+默认 `UI_SIM`，屏幕上明确显示「模拟」。所有 GPIO、显示窗口、IMU 轴、模式和目标 AP 集中在 `include/starchart_config.h`。切换真实模式前填写 `CHART_TARGET_SSID`；可选 BSSID 防止同名 AP 混淆。
+
+```text
+help          查看串口命令
+mode ui       自动姿态 + 合成 RSSI
+mode imu      MPU6050 + 合成 RSSI，静置 2.5 秒校准
+mode live     MPU6050 + 固定 BSSID 的 Beacon RSSI
+angle 30      模拟姿态设为 +30°，停止自动旋转
+signal off    停止合成采样，盘仍跟随姿态
+zero          重新置零并清空本轮
+cal           重新初始化 MPU6050、校准并清空本轮
+stats         查看角度、覆盖、包数及时间对齐统计
+```
+
+主机验证与预览生成：
+
+```sh
+sh tools/test_chart.sh
+python3 -m pip install Pillow
+python3 tools/build_chart_preview.py
+```
+
+当前已通过 ESP32-C5 编译和主机模拟测试，未烧录或完成实机验收。屏幕初始化、窗口偏移、RGB/BGR、背光电路、IMU 轴符号、真实 RSSI、实际 FPS 和十分钟设备稳定性仍需实测。
