@@ -1,28 +1,34 @@
-# esp32-adc-detector
+# esp32-adc-detector (ESP32-C5)
 
-手持式隐藏发射设备探测器：用 ESP32-S3 + AD8318 射频检波器，在酒店、民宿等场所临时检查正在发射信号的隐藏设备（Wi-Fi 摄像头、BLE 追踪器、GSM 窃听器等）。
-
-方案、算法和开发阶段见 [docs/design.md](docs/design.md)。
+基于 ESP32-C5 的设备识别项目，当前阶段为最小硬件测试。识别方案和传感器接入将在后续讨论，目前尚未实现射频扫描或 ADC 检测。
 
 ## 硬件
 
-- 主控板：[Waveshare ESP32-S3-RLCD-4.2](https://docs.waveshare.net/ESP32-S3-RLCD-4.2)（ESP32-S3-WROOM-1-N16R8，4.2" 300×400 反射式屏幕，18650 电池座）
-- 检波器：AD8318（1 MHz–8 GHz，输出 0.5–2.1 V，信号越强电压越低），输出接 GPIO1，屏蔽层接 GND
+- ESP32-C5，已连接芯片 revision v1.2，16 MB Flash。
+- GPIO27：板载 WS2812B RGB LED，使用 RMT 驱动。
+- GPIO28：BOOT 按键，按下为低电平。
+- USB Serial/JTAG：烧录和日志；PSRAM 容量未核实，暂不启用。
 
-### 板卡
+![ESP32-C5 Pinout](docs/esp32-c5-pinout.png)
 
-![ESP32-S3-RLCD-4.2 板卡](docs/ESP32-S3-RLCD-4.2-HW.webp)
+## LED 测试
 
-### GPIO 分配
+- 上电后以白色呼吸，约 2 秒一个周期。
+- BOOT 按一次随机切换颜色，呼吸效果继续。
+- 按键消抖 50 ms，长按只切换一次。重启恢复白色。
+- 亮度上限为 48/255，不启用 Wi-Fi、BLE 或 PSRAM。
 
-![ESP32-S3-RLCD-4.2 GPIO 表](docs/ESP32-S3-RLCD-4.2-IntfIntro-GPIO.webp)
+已完成编译、烧录和启动日志检查，呼吸灯及 BOOT 换色效果已实机确认。
 
-## 构建
+## 构建与烧录
 
-PlatformIO + ESP-IDF：
+PlatformIO + ESP-IDF 5.5.5，默认环境 `esp32-c5`。通过固定的 pioarduino release 安装标准工具链，环境详情见 [docs/c5-environment.md](docs/c5-environment.md)。
 
 ```sh
-pio run                 # 编译
-pio run -t upload       # 烧录
-pio device monitor      # 串口日志
+export PATH="$HOME/.platformio/penv/bin:$PATH"
+pio run
+pio run -t upload --upload-port /dev/cu.usbmodem101
+pio device monitor --port /dev/cu.usbmodem101
 ```
+
+串口以 `pio device list` 为准。不要在复位或上电时按住 BOOT，否则设备会进入下载模式。

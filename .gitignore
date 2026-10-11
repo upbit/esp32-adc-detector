@@ -5,3 +5,5 @@
 .vscode/ipch
 .DS_Store
 managed_components
+sdkconfig.esp32-c5
+sdkconfig.esp32-c5.old
