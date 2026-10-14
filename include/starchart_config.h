@@ -21,6 +21,9 @@
 #define CHART_LCD_REFRESH_TEST 1 /* 0 restores the existing star-chart tasks. */
 #endif
 #define CHART_LCD_REFRESH_ROWS 64 /* Benchmark maximum: 40960 bytes, not a full frame. */
+#define CHART_LCD_PIPE_ROWS 32 /* Two regions share the existing 64-row allocation. */
+#define CHART_LCD_BUTTON 28 /* DevKitC-1 BOOT, active low. */
+#define CHART_LCD_BUTTON_DEBOUNCE_US 30000
 #define CHART_LCD_REFRESH_Y 96
 #define CHART_LCD_REFRESH_HEIGHT 128 /* Two independently animated 64-row bands. */
 #define CHART_TILE_ROWS 16

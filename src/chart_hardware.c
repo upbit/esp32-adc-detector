@@ -22,6 +22,7 @@ static __attribute__((noinline)) void lcd_swap_optimized(uint16_t *pixels,size_t
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#ifndef CHART_LCD_HOST_TEST
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
@@ -31,16 +32,30 @@ static __attribute__((noinline)) void lcd_swap_optimized(uint16_t *pixels,size_t
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
+#endif
 
 static spi_device_handle_t lcd;
 static size_t lcd_dma_max;
 static uint32_t lcd_pixel_hz=CHART_LCD_SPI_HZ;
+#ifndef CHART_LCD_HOST_TEST
 static i2c_master_dev_handle_t imu;
 static QueueHandle_t signal_queue;
 static uint8_t locked_bssid[6];
 static atomic_bool listening;
 static atomic_uint dropped;
 static bool wifi_initialized;
+#endif
+
+#if CHART_LCD_REFRESH_TEST
+static struct {
+    bool open,last,failed,asynchronous;
+    size_t remaining;
+    unsigned pending,next;
+    spi_transaction_t tx[2];
+    chart_lcd_timing_t timing;
+    int64_t first_submit;
+} lcd_window;
+#endif
 
 #define TRY(call) do { esp_err_t e=(call); if (e!=ESP_OK) return e; } while (0)
 
@@ -93,7 +108,7 @@ esp_err_t chart_lcd_init(void)
     TRY(spi_bus_initialize(SPI2_HOST,&bus,SPI_DMA_CH_AUTO));
     spi_device_interface_config_t device={
         .clock_speed_hz=CHART_LCD_REFRESH_TEST ? CHART_LCD_FAST_SPI_HZ : CHART_LCD_SPI_HZ,
-        .mode=0,.spics_io_num=CHART_LCD_CS,.queue_size=1};
+        .mode=0,.spics_io_num=CHART_LCD_CS,.queue_size=CHART_LCD_REFRESH_TEST ? 2 : 1};
     TRY(spi_bus_add_device(SPI2_HOST,&device,&lcd));
     TRY(spi_bus_get_max_transaction_len(SPI2_HOST,&lcd_dma_max));
     lcd_dma_max&=~(size_t)3; /* Aligned DMA buffers and complete RGB565 pixels. */
@@ -125,6 +140,9 @@ esp_err_t chart_lcd_init(void)
 static esp_err_t lcd_tile_write(int y,int rows,uint16_t *pixels,chart_lcd_write_mode_t mode,
                                chart_lcd_timing_t *timing)
 {
+#if CHART_LCD_REFRESH_TEST
+    if (lcd_window.open || lcd_window.failed) return ESP_ERR_INVALID_STATE;
+#endif
     int x1=CHART_LCD_X_OFFSET,x2=x1+319,y1=CHART_LCD_Y_OFFSET+y,y2=y1+rows-1;
     uint8_t xs[]={x1>>8,x1&255,x2>>8,x2&255}, ys[]={y1>>8,y1&255,y2>>8,y2&255};
     if (timing) *timing=(chart_lcd_timing_t){0};
@@ -164,6 +182,25 @@ esp_err_t chart_lcd_tile_profiled(int y,int rows,uint16_t *pixels,chart_lcd_writ
     return lcd_tile_write(y,rows,pixels,mode,timing);
 }
 
+#if CHART_LCD_REFRESH_TEST
+#define LCD_WINDOW_FN(name) chart_lcd_window_##name
+#define LCD_WINDOW_ATTR
+#include "lcd_window.inc"
+#undef LCD_WINDOW_FN
+#undef LCD_WINDOW_ATTR
+
+#define LCD_WINDOW_FN(name) chart_lcd_window_##name##_o2
+#if defined(__GNUC__) && !defined(__clang__)
+#define LCD_WINDOW_ATTR __attribute__((optimize("O2"),noinline))
+#else
+#define LCD_WINDOW_ATTR
+#endif
+#include "lcd_window.inc"
+#undef LCD_WINDOW_FN
+#undef LCD_WINDOW_ATTR
+#endif
+
+#ifndef CHART_LCD_HOST_TEST
 static esp_err_t imu_write(uint8_t address,uint8_t value)
 {
     uint8_t bytes[]={address,value};
@@ -294,4 +331,5 @@ esp_err_t chart_wifi_start(QueueHandle_t queue,char source[33],int *frequency)
     return result;
 }
 
+#endif
 #endif
