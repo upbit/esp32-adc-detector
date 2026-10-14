@@ -24,4 +24,17 @@ with tempfile.TemporaryDirectory(prefix="chart-preview-") as temp:
     frames[20].resize((960, 960), Image.Resampling.NEAREST).save(args.output / "starchart-sim-3x.png")
     frames[0].save(args.output / "starchart-sim.gif", save_all=True, append_images=frames[1:],
                    duration=500, loop=0, optimize=False)
+    # Contact sheet of the text and state pages, so every case is reviewed at once.
+    cases = sorted(temp.glob("case-*.ppm"))
+    if cases:
+        images = [(path.stem[5:], Image.open(path).convert("RGB")) for path in cases]
+        columns = 5
+        rows = (len(images) + columns - 1) // columns
+        sheet = Image.new("RGB", (columns * 320, rows * 320), (0, 0, 0))
+        for index, (_name, image) in enumerate(images):
+            sheet.paste(image, ((index % columns) * 320, (index // columns) * 320))
+        sheet.save(args.output / "starchart-cases.png")
+        for name, image in images:
+            image.save(args.output / f"case-{name}.png")
+        print("cases: " + ", ".join(name for name, _ in images))
 print(f"Preview assets: {args.output}")

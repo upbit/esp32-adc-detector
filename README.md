@@ -6,6 +6,8 @@
 
 实现要求见 [星盘 UI V1](docs/星盘UI_V1_AI实现要求.md)，配置与完整调试流程见 [原型说明](docs/starchart-prototype.md)。
 
+下一版的 [星盘 UI 还原需求与实施计划](docs/starchart-ui-reconstruction-plan.md)：大星盘布局(R=114、圆心 (160,156))、16 px 脏格差异刷新、双 32 行缓冲，目标为转动时约 120 FPS，以及压力测试代码迁移清理。P0 设计已确认，P1 完成布局与字库(字号 10/12/18/24 px，修复 `CAM_02` 下划线丢失)；差异刷新与默认分支切换仍在 P2..P5，下述默认固件尚未改变。
+
 **当前默认固件以 14「WINDOW PIPE32」为新基线**，新增 15「PIPE32 O2」作为同算法 O2 热路径对照，保留 10「WIRE 80M MAX」旧基线和 13「WINDOW SYNC」同步窗口对照。BOOT 顺序为 **14→15→10→13→14**，30 ms 消抖，长按不重复。15 只优化刷新与窗口函数，IDF SPI 驱动不变。原星盘 UI/IMU/Wi-Fi 暂停，完整动态面积 320×128，40 KiB 像素分配不增加。初始化/命令为 40 MHz，动态像素为 80 MHz，各策略每秒日志/FPS 维护口径相同；切换前 DMA 全部回收。`CHART_LCD_REFRESH_TEST=0` 恢复星盘。完整方案见 [LCD 刷新测试](docs/lcd-refresh-test.md)。
 
 串口保留 `swap/cmd/dma` 分项耗时、堆栈与帧间隔统计，仍完整刷新 320×128，未做脏矩形，后者留到真实 UI 阶段。

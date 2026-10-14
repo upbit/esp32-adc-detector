@@ -29,6 +29,20 @@
 #define CHART_TILE_ROWS 16
 #define CHART_FPS 60 /* Above the full-frame bandwidth limit, for refresh testing. */
 
+/* Shared layout: the renderer and chart_screen_point must agree on the centre. */
+#define CHART_CENTER_X 160
+#define CHART_CENTER_Y 156
+#define CHART_OUTER_R 114 /* Outer ring; ticks and glow extend a few pixels further. */
+#define CHART_SAMPLE_R 103 /* Fixed sample radius; RSSI never moves points radially. */
+/* Text sizes confirmed in P0; previews may still adjust placement, not these values. */
+#define CHART_FONT_NAME 18
+#define CHART_FONT_RSSI 24
+#define CHART_FONT_ANGLE 18
+#define CHART_FONT_FREQ 12
+#define CHART_FONT_SMALL 10
+/* Noto Sans SC hhea ascender is 1.16 em; used to align different sizes on one baseline. */
+#define CHART_ASCENT(size) (((size)*116+50)/100)
+
 #define CHART_IMU_SDA 23
 #define CHART_IMU_SCL 24
 #define CHART_IMU_ADDRESS 0x68

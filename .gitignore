@@ -7,3 +7,5 @@
 managed_components
 sdkconfig.esp32-c5
 sdkconfig.esp32-c5.old
+# Font source is a 17 MB upstream download; the baked header is what ships.
+fonts/*.ttf

@@ -1,4 +1,5 @@
 #include "starchart.h"
+#include "starchart_font.h"
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -17,15 +18,16 @@ static void sample(float angle,int rssi)
 static void geometry(void)
 {
     float x,y;
-    chart_screen_point(0,0,88,&x,&y);
-    assert(fabsf(x-160)<0.001f && fabsf(y-82)<0.001f);
-    chart_screen_point(0,30,88,&x,&y);
-    assert(fabsf(x-116)<0.001f && fabsf(y-(170-88*cosf(3.14159265f/6)))<0.001f);
-    chart_screen_point(30,30,88,&x,&y);
-    assert(fabsf(x-160)<0.001f && fabsf(y-82)<0.001f);
+    const float r=CHART_SAMPLE_R,cx=CHART_CENTER_X,cy=CHART_CENTER_Y;
+    chart_screen_point(0,0,r,&x,&y);
+    assert(fabsf(x-cx)<0.001f && fabsf(y-(cy-r))<0.001f);
+    chart_screen_point(0,30,r,&x,&y);
+    assert(fabsf(x-(cx-r*0.5f))<0.001f && fabsf(y-(cy-r*cosf(3.14159265f/6)))<0.001f);
+    chart_screen_point(30,30,r,&x,&y);
+    assert(fabsf(x-cx)<0.001f && fabsf(y-(cy-r))<0.001f);
     float x2,y2;
-    chart_screen_point(60,179.9f,88,&x,&y);
-    chart_screen_point(60,-179.9f,88,&x2,&y2);
+    chart_screen_point(60,179.9f,r,&x,&y);
+    chart_screen_point(60,-179.9f,r,&x2,&y2);
     assert(hypotf(x-x2,y-y2)<0.4f);
     assert(chart_wrap180(361)==1 && chart_wrap180(-181)==179);
     assert(chart_channel_frequency(6)==2437 && chart_channel_frequency(14)==2484);
@@ -127,13 +129,18 @@ static void rendering(void)
         memcpy(frame+y*320,tile,sizeof(tile));
     }
     uint16_t background=frame[319*320+319];
-    assert(frame[82*320+160]!=background);
-    assert(frame[108*320+222]==background); /* Missing +45 degree bin stays empty. */
-    assert(frame[170*320+160]!=background);
+    /* Sample ring sits at a fixed radius above the centre; the centre carries the dot. */
+    const int top_y=CHART_CENTER_Y-CHART_SAMPLE_R;
+    assert(frame[top_y*320+CHART_CENTER_X]!=background);
+    const int gap_x=(int)(CHART_CENTER_X+CHART_SAMPLE_R*0.7071f);
+    const int gap_y=(int)(CHART_CENTER_Y-CHART_SAMPLE_R*0.7071f);
+    assert(frame[gap_y*320+gap_x]==background); /* Missing +45 degree bin stays empty. */
+    assert(frame[CHART_CENTER_Y*320+CHART_CENTER_X]!=background);
     uint32_t count=model.samples;
     float rssi=model.bins[0].rssi;
-    chart_render_tile(&model,clock_us+25000000,80,CHART_TILE_ROWS,tile);
-    assert(memcmp(frame+80*320,tile,sizeof(tile))!=0);
+    const int fade_band=top_y-top_y%CHART_TILE_ROWS;
+    chart_render_tile(&model,clock_us+25000000,fade_band,CHART_TILE_ROWS,tile);
+    assert(memcmp(frame+fade_band*320,tile,sizeof(tile))!=0);
     assert(model.samples==count && model.bins[0].rssi==rssi);
     puts("PASS: native 320x320 raster, antenna and samples visible, unscanned gap blank, age fade does not mutate RSSI");
 }
@@ -160,6 +167,42 @@ static void render_tiles(void)
     assert(memcmp(before,tile,11*320*sizeof(*tile))==0);
     assert(tile[11*320]!=before[11*320]);
     puts("PASS: full-circle/faded/fractional-angle tiled raster matches full frame; test footer stays in its band");
+}
+
+static void glyph_coverage(void)
+{
+    /* Every drawable glyph must carry ink: a blank box means the bake clipped it. */
+    for (unsigned j=0;j<sizeof(chart_glyphs)/sizeof(*chart_glyphs);++j) {
+        const chart_glyph_t *g=&chart_glyphs[j];
+        if (g->code==' ') continue;
+        unsigned ink=0;
+        for (unsigned p=0;p<(unsigned)g->width*g->height;++p) {
+            unsigned v=chart_font_data[g->offset+p/2];
+            if (p%2 ? v&15 : v>>4) ++ink;
+        }
+        assert(ink>0);
+    }
+    /* Digits are monospaced per size so a changing reading never shifts neighbours. */
+    for (unsigned j=0;j<sizeof(chart_glyphs)/sizeof(*chart_glyphs);++j) {
+        const chart_glyph_t *g=&chart_glyphs[j];
+        if (g->code<'0' || g->code>'9') continue;
+        const chart_glyph_t *zero=NULL;
+        for (unsigned k=0;k<sizeof(chart_glyphs)/sizeof(*chart_glyphs);++k)
+            if (chart_glyphs[k].code=='0' && chart_glyphs[k].size==g->size) zero=&chart_glyphs[k];
+        assert(zero && g->width==zero->width);
+    }
+    /* The underscore regression: CAM_02 lost its bar when the box clipped descenders. */
+    for (unsigned j=0;j<sizeof(chart_glyphs)/sizeof(*chart_glyphs);++j) {
+        const chart_glyph_t *g=&chart_glyphs[j];
+        if (g->code!='_') continue;
+        unsigned ink=0;
+        for (unsigned p=0;p<(unsigned)g->width*g->height;++p) {
+            unsigned v=chart_font_data[g->offset+p/2];
+            if (p%2 ? v&15 : v>>4) ++ink;
+        }
+        assert(ink>=g->width);
+    }
+    puts("PASS: every glyph inked, digits monospaced per size, underscore bar present");
 }
 
 static void beacon_filter(void)
@@ -265,7 +308,7 @@ static void endurance(void)
 
 int main(void)
 {
-    geometry(); buckets(); synchronization(); calibration(); boot_pattern(); rendering(); render_tiles(); refresh_pattern(); beacon_filter(); endurance();
+    geometry(); buckets(); synchronization(); calibration(); boot_pattern(); rendering(); render_tiles(); glyph_coverage(); refresh_pattern(); beacon_filter(); endurance();
     printf("All host tests passed. model=%zu bytes, tile=%zu bytes\n",sizeof(model),sizeof(tile));
     return 0;
 }

@@ -1,5 +1,7 @@
 # 信源星盘 V1 原型
 
+下一版参见 [UI 还原需求与实施计划](starchart-ui-reconstruction-plan.md)：已确认大星盘与差异刷新方向，本轮只整理计划，具体设计待确认，代码及下述现行实现未改变。
+
 2026-10-14 当前默认以 [LCD 刷新策略 14](lcd-refresh-test.md) 为新基线，临时屏蔽本文星盘任务及 5 秒检查页；动态面积 320×128，BOOT 顺序为 14→15（同算法 O2 热路径）→10（旧基线）→13（连续窗口同步）→14。初始化/命令为 40 MHz，像素为 80 MHz，保留每秒 FPS 更新和日志。`CHART_LCD_REFRESH_TEST=0` 恢复本文流程。下述“单 16 行缓冲”描述的是星盘模式；刷新测试仅分配 40 KiB，10/13 用单 64 行区，14/15 分成两个 32 行区，DMA 完成回收后才复用。
 
 后续优化仅作 [真实 UI 阶段备忘](lcd-refresh-pipeline-design.md#真实-ui-阶段备忘暂不实施)：窗口缓存 + 跨帧首块预生成，以及更激进的跨帧持续窗口 + 持续流水线。用户决定暂不开发，到真实 UI 实测绘制、刷新区域、IMU/Wi-Fi 负载和帧间隔后再决策；实施前仍需设计及确认。
@@ -103,7 +105,7 @@ python3 tools/build_chart_preview.py
 
 动画真实生成合成包，扫描 -40° 至 +70° 后停止生成，继续反向转动；覆盖 12/36，111 包，最终稳定峰约 +62°（10° 桶和窗口统计造成的近似），不是预先画好的完整圈。图片为模拟输出，不是设备测量记录。
 
-字库已嵌入 14/20/28 px、4-bit 精简 Noto Sans SC，共 260 个字形、31784 B 位图数据，许可见 `fonts/OFL.txt`。包含本页中文状态、ASCII 和度数；不支持任意中文 SSID，未包含字符显示 `?`，长名称省略。重建字库可从 Google Fonts `ofl/notosanssc/NotoSansSC[wght].ttf` 获取源字体后运行 `tools/generate_chart_font.py <font> include/starchart_font.h`；数字不依赖运行机器字体。
+字库已嵌入 10/12/18/24 px、4-bit 精简 Noto Sans SC，共 384 个字形、30263 B 位图数据，许可见 `fonts/OFL.txt`。盒高由字体自身 ascent/descent 决定并按各字号实际墨迹统一裁剪，`top` 字段让不同字号共享基线；数字按字号等宽，读数变化不挤动相邻文字。24 px 仅含数字与正负号，供 RSSI 读数使用。包含本页中文状态、ASCII 和度数；不支持任意中文 SSID，未包含字符显示 `?`，长名称省略。重建字库可从 Google Fonts `ofl/notosanssc/NotoSansSC[wght].ttf` 获取源字体后运行 `tools/generate_chart_font.py <font> include/starchart_font.h`；源字体约 17 MB，不随仓库提交，烘焙后的头文件才是交付物。生成器遇到非空格字形烘焙为空白会直接报错，`tools/inspect_chart_font.py` 可复核墨迹边界。数字不依赖运行机器字体。
 
 ## 本轮实际结论
 

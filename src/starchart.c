@@ -25,8 +25,8 @@ int chart_channel_frequency(int c)
 void chart_screen_point(float sample, float display, float r, float *x, float *y)
 {
     float a = chart_wrap180(sample - display) * PI / 180.0f;
-    *x = 160.0f + r * sinf(a);
-    *y = 170.0f - r * cosf(a);
+    *x = CHART_CENTER_X + r * sinf(a);
+    *y = CHART_CENTER_Y - r * cosf(a);
 }
 
 float chart_synthetic_rssi(float heading)

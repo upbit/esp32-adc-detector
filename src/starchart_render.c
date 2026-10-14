@@ -79,20 +79,21 @@ static void polar(float angle, float radius, float *x, float *y)
 {
     int index = (int)lroundf(angle*2) % 720;
     if (index < 0) index += 720;
-    *x = 160+radius*sine[index];
-    *y = 170-radius*cosine[index];
+    *x = CHART_CENTER_X+radius*sine[index];
+    *y = CHART_CENTER_Y-radius*cosine[index];
 }
 
 static bool arc_in_tile(float start,float end,float r,float padding)
 {
-    if (end-start>=180) return 170+r+padding>=tile_y && 170-r-padding<tile_y+tile_rows;
+    if (end-start>=180)
+        return CHART_CENTER_Y+r+padding>=tile_y && CHART_CENTER_Y-r-padding<tile_y+tile_rows;
     float x,y1,y2;
     polar(start,r,&x,&y1); polar(end,r,&x,&y2);
     float top=fminf(y1,y2),bottom=fmaxf(y1,y2);
     int half=(int)floorf(start/180)+1;
     if (half*180.0f<=end) {
-        if (half%2) bottom=170+r;
-        else top=170-r;
+        if (half%2) bottom=CHART_CENTER_Y+r;
+        else top=CHART_CENTER_Y-r;
     }
     return bottom+padding>=tile_y && top-padding<tile_y+tile_rows;
 }
@@ -153,14 +154,16 @@ static void text(const char *s, int x, int y, int size, color_t c, int limit)
             if (code!='.' && limit-x>=text_width("...",size)) text("...",x,y,size,c,limit);
             return;
         }
-        if (y+g->height>=tile_y && y<tile_y+tile_rows) {
+        /* Glyph rows are trimmed to inked extent; `top` restores the shared baseline. */
+        int top=y+g->top;
+        if (top+g->height>=tile_y && top<tile_y+tile_rows) {
             for (int py=0; py<g->height; ++py) {
-                if (y+py<tile_y || y+py>=tile_y+tile_rows) continue;
+                if (top+py<tile_y || top+py>=tile_y+tile_rows) continue;
                 for (int px=0; px<g->width; ++px) {
                     unsigned pos=py*g->width+px;
                     unsigned v=chart_font_data[g->offset+pos/2];
                     unsigned a=pos%2 ? v&15 : v>>4;
-                    if (a) pixel(x+px,y+py,c,a);
+                    if (a) pixel(x+px,top+py,c,a);
                 }
             }
         }
@@ -170,7 +173,7 @@ static void text(const char *s, int x, int y, int size, color_t c, int limit)
 
 static void centered(const char *s,int y,int size,color_t c)
 {
-    text(s,160-text_width(s,size)/2,y,size,c,320);
+    text(s,CHART_CENTER_X-text_width(s,size)/2,y,size,c,320);
 }
 
 void chart_render_init(void)
@@ -208,20 +211,24 @@ void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_
 {
     tile=buffer; tile_y=y; tile_rows=rows;
     for (int j=0; j<320*rows; ++j) tile[j]=pack(bg);
-    for (int r=25;r<=74;r+=r==25 ? 24 : 25)
+    /* Inner grid rings scale with the outer ring: 0.26 and 0.47 and 0.68 of R. */
+    for (int r=29;r<=86;r+=r==29 ? 28 : 29)
         for (int a=0;a<360;a+=8) arc(a,a+3,r,0.8f,grid);
-    line(62,170,258,170,0.7f,grid);
-    line(160,72,160,268,0.7f,grid);
-    arc(0,360,98,0.9f,mix(grid,muted,0.25f));
+    line(CHART_CENTER_X-CHART_OUTER_R+6,CHART_CENTER_Y,
+         CHART_CENTER_X+CHART_OUTER_R-6,CHART_CENTER_Y,0.7f,grid);
+    line(CHART_CENTER_X,CHART_CENTER_Y-CHART_OUTER_R+6,
+         CHART_CENTER_X,CHART_CENTER_Y+CHART_OUTER_R-6,0.7f,grid);
+    arc(0,360,CHART_OUTER_R,0.9f,mix(grid,muted,0.25f));
     for (int a=0;a<360;a+=10) {
         float x1,y1,x2,y2;
-        polar(a,96,&x1,&y1); polar(a,a%30 ? 99 : 102,&x2,&y2);
+        polar(a,CHART_OUTER_R-2,&x1,&y1);
+        polar(a,a%30 ? CHART_OUTER_R+1 : CHART_OUTER_R+4,&x2,&y2);
         line(x1,y1,x2,y2,0.9f,mix(grid,muted,0.35f));
     }
     /* Fixed antenna cone and ray, never an independent radar sweep. */
     for (int a=-10;a<=10;a+=2) {
         float x1,y1,x2,y2;
-        polar(a,12,&x1,&y1); polar(a,91,&x2,&y2);
+        polar(a,14,&x1,&y1); polar(a,CHART_SAMPLE_R-7,&x2,&y2);
         line(x1,y1,x2,y2,2,mix(bg,dark,0.22f*(1-fabsf((float)a)/12)));
     }
     for (int i=0;i<CHART_BINS;++i) {
@@ -230,60 +237,62 @@ void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_
         float angle=chart_wrap180(b->heading-m->display_heading);
         float span=next->count ? chart_wrap180(next->heading-b->heading) : 0;
         if (span<0 || span>20) span=0;
-        if (!arc_in_tile(angle,angle+span,88,7)) continue;
+        if (!arc_in_tile(angle,angle+span,CHART_SAMPLE_R,7)) continue;
         color_t c=bin_color(b,now);
         float width=bin_width(b,now);
         if (span>0) {
             color_t next_color=bin_color(next,now);
             float next_width=bin_width(next,now);
             for (float t=0;t<span;t+=1) {
-                if (!arc_in_tile(angle+t,angle+fminf(t+1,span),88,7)) continue;
+                if (!arc_in_tile(angle+t,angle+fminf(t+1,span),CHART_SAMPLE_R,7)) continue;
                 color_t part=mix(c,next_color,t/span);
                 float w=width+(next_width-width)*t/span;
-                arc(angle+t,angle+fminf(t+1,span),88,w+4,mix(bg,part,0.08f));
-                arc(angle+t,angle+fminf(t+1,span),88,w+2,mix(bg,part,0.16f));
-                arc(angle+t,angle+fminf(t+1,span),88,w,part);
+                arc(angle+t,angle+fminf(t+1,span),CHART_SAMPLE_R,w+4,mix(bg,part,0.08f));
+                arc(angle+t,angle+fminf(t+1,span),CHART_SAMPLE_R,w+2,mix(bg,part,0.16f));
+                arc(angle+t,angle+fminf(t+1,span),CHART_SAMPLE_R,w,part);
             }
         }
-        float px,py; polar(angle,88,&px,&py);
+        float px,py; polar(angle,CHART_SAMPLE_R,&px,&py);
         disc(px,py,now-b->updated_us<=CHART_FRESH_US ? 1.8f : 0.9f,c);
     }
     if (m->peak_bin>=0) {
         const chart_bin_t *b=&m->bins[m->peak_bin];
         float a=chart_wrap180(b->heading-m->display_heading);
         color_t c=now-b->updated_us>CHART_DARK_US ? history : amber;
-        arc(a-6,a+6,88,8,mix(bg,c,0.15f));
-        arc(a-6,a+6,88,4,c);
-        float px,py; polar(a,88,&px,&py); disc(px,py,2,mix(c,white,0.4f));
+        arc(a-6,a+6,CHART_SAMPLE_R,8,mix(bg,c,0.15f));
+        arc(a-6,a+6,CHART_SAMPLE_R,4,c);
+        float px,py; polar(a,CHART_SAMPLE_R,&px,&py); disc(px,py,2,mix(c,white,0.4f));
     }
-    line(160,170,160,78,1,cyan);
-    disc(160,170,3,cyan);
-    for (int py=64;py<=75;++py) {
-        int half=(py-64)/2;
-        for (int px=160-half;px<=160+half;++px) pixel(px,py,cyan,15);
+    /* Antenna marker sits just outside the sample ring, straddling the outer ring. */
+    line(CHART_CENTER_X,CHART_CENTER_Y,CHART_CENTER_X,CHART_CENTER_Y-CHART_SAMPLE_R-4,1,cyan);
+    disc(CHART_CENTER_X,CHART_CENTER_Y,3,cyan);
+    for (int py=CHART_CENTER_Y-CHART_OUTER_R-10;py<=CHART_CENTER_Y-CHART_OUTER_R+1;++py) {
+        int half=(py-(CHART_CENTER_Y-CHART_OUTER_R-10))/2;
+        for (int px=CHART_CENTER_X-half;px<=CHART_CENTER_X+half;++px) pixel(px,py,cyan,15);
     }
-    text(m->source[0] ? m->source : "--",12,10,20,white,185);
+    text(m->source[0] ? m->source : "--",12,8,CHART_FONT_NAME,white,185);
     char label[64];
     if (m->frequency_mhz) snprintf(label,sizeof(label),"%d MHz",m->frequency_mhz);
     else snprintf(label,sizeof(label),"-- MHz");
-    text(label,12,38,14,muted,132);
+    text(label,12,32,CHART_FONT_FREQ,muted,132);
     bool stale=!m->last_signal_us || now-m->last_signal_us>CHART_SIGNAL_TIMEOUT_US;
     if (m->last_signal_us) snprintf(label,sizeof(label),"%d",(int)lroundf(m->current_rssi));
     else snprintf(label,sizeof(label),"--");
-    text(label,278-text_width(label,28),7,28,stale ? history : cyan,278);
-    text("dBm",281,24,14,muted,318);
-    if (m->mode!=LIVE_WIFI) text("模拟",12,57,14,amber,70);
-    centered("天线",47,14,cyan);
-    text("-90°",12,162,14,muted,59);
-    text("+90°",268,162,14,muted,319);
-    centered("180°",270,14,muted);
+    text(label,278-text_width(label,CHART_FONT_RSSI),4,CHART_FONT_RSSI,stale ? history : cyan,278);
+    text("dBm",281,22,CHART_FONT_SMALL,muted,318);
+    if (m->mode!=LIVE_WIFI) text("模拟",12,52,CHART_FONT_SMALL,amber,70);
+    centered("天线",6,CHART_FONT_SMALL,cyan);
+    text("-90°",12,CHART_CENTER_Y-10,CHART_FONT_SMALL,muted,44);
+    text("+90°",276,CHART_CENTER_Y-10,CHART_FONT_SMALL,muted,319);
     int angle=(int)lroundf(chart_wrap180(m->heading));
     if (angle==180) angle=-180;
     snprintf(label,sizeof(label),"%+04d°",angle);
-    int w=text_width("转角 ",14)+text_width(label,20);
-    int left=160-w/2;
-    text("转角 ",left,231,14,muted,320);
-    text(label,left+text_width("转角 ",14),227,20,cyan,320);
+    /* Turn angle stays inside the dial; baselines align via the 1.16em ascent. */
+    int w=text_width("转角 ",CHART_FONT_SMALL)+text_width(label,CHART_FONT_ANGLE);
+    int left=CHART_CENTER_X-w/2;
+    text("转角 ",left,206+CHART_ASCENT(CHART_FONT_ANGLE)-CHART_ASCENT(CHART_FONT_SMALL),
+         CHART_FONT_SMALL,muted,320);
+    text(label,left+text_width("转角 ",CHART_FONT_SMALL),206,CHART_FONT_ANGLE,cyan,320);
     unsigned first=(m->trend_next+CHART_TREND_LENGTH-m->trend_used)%CHART_TREND_LENGTH;
     for (unsigned i=1;i<m->trend_used;++i) {
         chart_signal_event_t a=m->trend[(first+i-1)%CHART_TREND_LENGTH];
@@ -294,6 +303,8 @@ void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_
         float v2=fmaxf(0,fminf(1,(b.rssi-CHART_RSSI_MIN)/(CHART_RSSI_MAX-CHART_RSSI_MIN)));
         line(x1,57-v1*12,x2,57-v2*12,1,stale ? history : dark);
     }
+    /* Bottom: `180°` outside the dial, then the coverage bar, then one status line. */
+    centered("180°",CHART_CENTER_Y+CHART_OUTER_R+6,CHART_FONT_SMALL,muted);
     line(67,294,253,294,3,grid);
     if (m->coverage) line(67,294,67+186.0f*m->coverage/CHART_BINS,294,3,cyan);
     const char *status="慢速转动设备";
@@ -303,7 +314,7 @@ void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_
     else if (m->target_status==CHART_WIFI_ERROR) status="Wi-Fi 错误";
     else if (m->target_status==CHART_TARGET_MISSING) status="未发现信号";
     else if (stale || m->target_status==CHART_TARGET_SEARCH) status="等待信号";
-    centered(status,302,14,muted);
+    centered(status,303,CHART_FONT_SMALL,muted);
 }
 
 void chart_render_test_tile(int y,int rows,uint16_t *buffer)
