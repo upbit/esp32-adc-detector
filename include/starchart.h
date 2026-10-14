@@ -70,3 +70,14 @@ void chart_render_init(void);
 void chart_render_tile(const chart_model_t *snapshot, int64_t now, int y, int rows,
                        uint16_t *rgb565);
 void chart_render_test_tile(int y, int rows, uint16_t *rgb565);
+void chart_render_test_overlay(int y, int rows, uint16_t *rgb565,
+                               const char *label, unsigned frame);
+void chart_render_refresh_tile(int y, int rows, uint16_t *rgb565,
+                               const char *strategy, float fps, int64_t elapsed_us,
+                               unsigned frame);
+/* Motion region only: REFRESH_Y <= y, y + rows <= REFRESH_Y + REFRESH_HEIGHT. */
+void chart_render_refresh_band(int y, int rows, uint16_t *rgb565,
+                               int64_t elapsed_us, unsigned frame);
+/* Same motion raster, stored as MSB-first bytes for direct LCD transmission. */
+void chart_render_refresh_band_wire(int y, int rows, uint16_t *pixels,
+                                    int64_t elapsed_us, unsigned frame);

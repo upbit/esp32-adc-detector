@@ -5,17 +5,26 @@
 #define CHART_LCD_SCK 6
 #define CHART_LCD_CS 10
 #define CHART_LCD_DC 9
-#define CHART_LCD_BL (-1)
+#define CHART_LCD_BL (-1) /* Do not drive GPIO0 until the BL circuit is confirmed. */
 #define CHART_LCD_BL_ACTIVE 1
-#define CHART_LCD_SPI_HZ 40000000
+#define CHART_LCD_SPI_HZ 40000000 /* Initialization, commands and baseline pixels. */
+#define CHART_LCD_FAST_SPI_HZ 80000000 /* Experimental pixel-only clock; verify optically. */
 #define CHART_LCD_X_OFFSET 0 /* Unverified: measure using the boot test pattern. */
 #define CHART_LCD_Y_OFFSET 0 /* Unverified: not an assumed 320x480 stretch. */
 #define CHART_LCD_ROTATION 0 /* 0, 90, 180, 270; verify offsets at each rotation. */
+#define CHART_LCD_MIRROR_X 1 /* Correct the observed left/right panel mirroring. */
 #define CHART_LCD_BGR 1
 #define CHART_LCD_INVERT 1
-#define CHART_LCD_TEST_MS 2000
+#define CHART_LCD_TEST_MS 5000 /* Hold the bright boot pattern for inspection. */
+#define CHART_LCD_TEST_ID 4 /* 0 restores the normal status footer. */
+#ifndef CHART_LCD_REFRESH_TEST
+#define CHART_LCD_REFRESH_TEST 1 /* 0 restores the existing star-chart tasks. */
+#endif
+#define CHART_LCD_REFRESH_ROWS 64 /* Benchmark maximum: 40960 bytes, not a full frame. */
+#define CHART_LCD_REFRESH_Y 96
+#define CHART_LCD_REFRESH_HEIGHT 128 /* Two independently animated 64-row bands. */
 #define CHART_TILE_ROWS 16
-#define CHART_FPS 25
+#define CHART_FPS 60 /* Above the full-frame bandwidth limit, for refresh testing. */
 
 #define CHART_IMU_SDA 23
 #define CHART_IMU_SCL 24

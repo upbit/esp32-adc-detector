@@ -13,6 +13,8 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#if !CHART_LCD_REFRESH_TEST
+
 typedef enum { CMD_MODE, CMD_ANGLE, CMD_AUTO, CMD_SIGNAL, CMD_CLEAR, CMD_ZERO, CMD_CAL } command_type_t;
 typedef struct { command_type_t type; float value; } command_t;
 typedef struct { chart_mode_t mode; unsigned revision; } wifi_request_t;
@@ -248,26 +250,57 @@ static void render_task(void *arg)
     chart_render_init();
     esp_err_t err=chart_lcd_init();
     if (err!=ESP_OK) { ESP_LOGE("lcd","init: %s",esp_err_to_name(err)); free(pixels); free(snapshot); vTaskDelete(NULL); return; }
+    ESP_LOGI("lcd","sending full-screen RGB/white boot test pattern");
     for (int y=0;y<320;y+=CHART_TILE_ROWS) {
         int rows=320-y<CHART_TILE_ROWS ? 320-y : CHART_TILE_ROWS;
         chart_render_test_tile(y,rows,pixels);
         ESP_ERROR_CHECK(chart_lcd_tile(y,rows,pixels));
     }
+    ESP_LOGI("lcd","test pattern sent over SPI (no panel readback); holding for %d ms",CHART_LCD_TEST_MS);
     vTaskDelay(pdMS_TO_TICKS(CHART_LCD_TEST_MS));
+    ESP_LOGI("lcd","boot test finished; starting star chart");
+    int64_t report_started=esp_timer_get_time(),draw_us=0,spi_us=0,frame_max_us=0;
+    unsigned report_frames=0,display_frame=0;
+    float display_fps=0;
+    ESP_LOGI("lcd","refresh test T%02d: %d MHz; animated chart and FPS footer",CHART_LCD_TEST_ID,CHART_LCD_SPI_HZ/1000000);
     for (;;) {
         int64_t started=esp_timer_get_time();
+        int64_t frame_draw_us=0,frame_spi_us=0;
+        char perf_label[48];
+        snprintf(perf_label,sizeof(perf_label),"T%02d %dMHz %.1fFPS",
+            CHART_LCD_TEST_ID,CHART_LCD_SPI_HZ/1000000,display_fps);
         lock(); memcpy(snapshot,&model,sizeof(model)); unlock();
         for (int y=0;y<320;y+=CHART_TILE_ROWS) {
             int rows=320-y<CHART_TILE_ROWS ? 320-y : CHART_TILE_ROWS;
+            int64_t tile_started=esp_timer_get_time();
             chart_render_tile(snapshot,started,y,rows,pixels);
+            if (CHART_LCD_TEST_ID) chart_render_test_overlay(y,rows,pixels,perf_label,display_frame);
+            int64_t drawn=esp_timer_get_time();
             err=chart_lcd_tile(y,rows,pixels);
+            frame_draw_us+=drawn-tile_started;
+            frame_spi_us+=esp_timer_get_time()-drawn;
             if (err!=ESP_OK) { ESP_LOGE("lcd","write: %s",esp_err_to_name(err)); break; }
             taskYIELD();
         }
-        if (err==ESP_OK) atomic_fetch_add(&frames,1);
+        int64_t finished=esp_timer_get_time();
+        if (err==ESP_OK) {
+            atomic_fetch_add(&frames,1);
+            ++display_frame;
+            ++report_frames;
+            draw_us+=frame_draw_us; spi_us+=frame_spi_us;
+            if (finished-started>frame_max_us) frame_max_us=finished-started;
+        }
+        if (finished-report_started>=5000000 && report_frames) {
+            display_fps=report_frames*1000000.0f/(finished-report_started);
+            ESP_LOGI("lcd","perf fps=%.2f draw=%.2f ms/frame spi=%.2f ms/frame max_work=%.2f ms",
+                display_fps,
+                draw_us/(1000.0f*report_frames),spi_us/(1000.0f*report_frames),frame_max_us/1000.0f);
+            report_started=esp_timer_get_time(); report_frames=0;
+            draw_us=spi_us=frame_max_us=0;
+        }
         int64_t remaining=1000000/CHART_FPS-(esp_timer_get_time()-started);
         TickType_t wait=remaining>0 ? pdMS_TO_TICKS(remaining/1000) : 0;
-        vTaskDelay(wait ? wait : 1);
+        if (wait || err!=ESP_OK) vTaskDelay(wait ? wait : 1);
     }
 }
 
@@ -301,3 +334,91 @@ void app_main(void)
         last_frames=count; previous=now;
     }
 }
+
+#else
+
+static void render_task(void *arg)
+{
+    (void)arg;
+    uint16_t *pixels=heap_caps_malloc(320*CHART_LCD_REFRESH_ROWS*2,MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);
+    if (!pixels) { ESP_LOGE("lcd","tile allocation failed"); vTaskDelete(NULL); return; }
+    ESP_ERROR_CHECK(chart_lcd_init());
+    const char *label="10 WIRE 80M MAX";
+    chart_lcd_fast_pixels(false);
+    for (int y=0;y<320;y+=CHART_TILE_ROWS) {
+        chart_render_refresh_tile(y,CHART_TILE_ROWS,pixels,label,0,0,0);
+        ESP_ERROR_CHECK(chart_lcd_tile(y,CHART_TILE_ROWS,pixels));
+    }
+    chart_lcd_fast_pixels(true);
+    unsigned frame=0,report_frames=0;
+    bool footer=false;
+    float fps=0;
+    int64_t epoch=esp_timer_get_time(),report_started=epoch,draw_us=0,spi_us=0,max_us=0;
+    chart_lcd_timing_t totals={0};
+    int64_t bytes=0;
+    int64_t last_start=0,interval_min=INT64_MAX,interval_max=0;
+    ESP_LOGI("lcd","baseline 10 only; command=%d MHz pixel=%d MHz dynamic=320x128; UI/IMU/Wi-Fi disabled; max tile=%d bytes",
+        CHART_LCD_SPI_HZ/1000000,CHART_LCD_FAST_SPI_HZ/1000000,320*CHART_LCD_REFRESH_ROWS*2);
+    for (;;) {
+        int64_t started=esp_timer_get_time(),elapsed=started-epoch;
+        if (last_start) {
+            int64_t interval=started-last_start;
+            if (interval<interval_min) interval_min=interval;
+            if (interval>interval_max) interval_max=interval;
+        }
+        last_start=started;
+        int64_t frame_draw=0,frame_spi=0;
+        int end_y=CHART_LCD_REFRESH_Y+CHART_LCD_REFRESH_HEIGHT;
+        for (int y=CHART_LCD_REFRESH_Y;y<end_y;y+=CHART_LCD_REFRESH_ROWS) {
+            int rows=end_y-y<CHART_LCD_REFRESH_ROWS ? end_y-y : CHART_LCD_REFRESH_ROWS;
+            int64_t drawing=esp_timer_get_time();
+            chart_render_refresh_band_wire(y,rows,pixels,elapsed,frame);
+            int64_t drawn=esp_timer_get_time();
+            chart_lcd_timing_t timing={0};
+            ESP_ERROR_CHECK(chart_lcd_tile_profiled(y,rows,pixels,CHART_LCD_WRITE_WIRE,&timing));
+            totals.swap_us+=timing.swap_us; totals.command_us+=timing.command_us; totals.dma_us+=timing.dma_us;
+            totals.command_khz=timing.command_khz; totals.pixel_khz=timing.pixel_khz;
+            frame_draw+=drawn-drawing; frame_spi+=esp_timer_get_time()-drawn;
+            bytes+=320*rows*2;
+        }
+        if (footer) {
+            footer=false;
+            for (int y=240;y<272;y+=CHART_TILE_ROWS) {
+                int64_t drawing=esp_timer_get_time();
+                chart_render_refresh_tile(y,CHART_TILE_ROWS,pixels,label,fps,elapsed,frame);
+                int64_t drawn=esp_timer_get_time();
+                chart_lcd_timing_t timing={0};
+                ESP_ERROR_CHECK(chart_lcd_tile_profiled(y,CHART_TILE_ROWS,pixels,CHART_LCD_WRITE_SWAP_O2,&timing));
+                totals.swap_us+=timing.swap_us; totals.command_us+=timing.command_us; totals.dma_us+=timing.dma_us;
+                frame_draw+=drawn-drawing; frame_spi+=esp_timer_get_time()-drawn;
+                bytes+=320*CHART_TILE_ROWS*2;
+            }
+        }
+        int64_t finished=esp_timer_get_time();
+        ++frame; ++report_frames;
+        draw_us+=frame_draw; spi_us+=frame_spi;
+        if (finished-started>max_us) max_us=finished-started;
+        if (finished-report_started>=1000000) {
+            fps=report_frames*1000000.0f/(finished-report_started);
+            ESP_LOGI("lcd","perf strategy=10 fps=%.2f draw=%.2f ms/frame spi=%.2f ms/frame max_work=%.2f ms payload=%.2f MB/s frames=%u interval=%.2f..%.2f ms swap=%.3f cmd=%.3f dma=%.3f ms/frame heap=%u min_heap=%u stack_free=%u clocks=%d/%d kHz",
+                fps,draw_us/(1000.0f*report_frames),spi_us/(1000.0f*report_frames),
+                max_us/1000.0f,bytes/(double)(finished-report_started),frame,
+                interval_min==INT64_MAX ? 0 : interval_min/1000.0f,interval_max/1000.0f,
+                totals.swap_us/(1000.0f*report_frames),totals.command_us/(1000.0f*report_frames),
+                totals.dma_us/(1000.0f*report_frames),(unsigned)esp_get_free_heap_size(),
+                (unsigned)esp_get_minimum_free_heap_size(),(unsigned)uxTaskGetStackHighWaterMark(NULL),
+                totals.command_khz,totals.pixel_khz);
+            report_started=finished; report_frames=0;
+            draw_us=spi_us=max_us=bytes=0; footer=true;
+            interval_min=INT64_MAX; interval_max=0;
+            totals=(chart_lcd_timing_t){0};
+        }
+    }
+}
+
+void app_main(void)
+{
+    configASSERT(xTaskCreate(render_task,"display",6144,NULL,1,NULL)==pdPASS);
+}
+
+#endif

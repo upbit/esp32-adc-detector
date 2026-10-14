@@ -1,3 +1,22 @@
+#include <stddef.h>
+#include <stdint.h>
+
+static __attribute__((noinline)) void lcd_swap_baseline(uint16_t *pixels,size_t count)
+{
+    for (size_t i=0;i<count;++i) pixels[i]=(pixels[i]<<8)|(pixels[i]>>8);
+}
+
+/* Same loop, isolated compile level so the baseline and other drivers stay unchanged. */
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("O2")))
+#endif
+static __attribute__((noinline)) void lcd_swap_optimized(uint16_t *pixels,size_t count)
+{
+    for (size_t i=0;i<count;++i) pixels[i]=(pixels[i]<<8)|(pixels[i]>>8);
+}
+
+#ifndef CHART_LCD_SWAP_HOST_TEST
+
 #include "chart_hardware.h"
 
 #include <stdatomic.h>
@@ -14,6 +33,8 @@
 #include "nvs_flash.h"
 
 static spi_device_handle_t lcd;
+static size_t lcd_dma_max;
+static uint32_t lcd_pixel_hz=CHART_LCD_SPI_HZ;
 static i2c_master_dev_handle_t imu;
 static QueueHandle_t signal_queue;
 static uint8_t locked_bssid[6];
@@ -23,59 +44,124 @@ static bool wifi_initialized;
 
 #define TRY(call) do { esp_err_t e=(call); if (e!=ESP_OK) return e; } while (0)
 
-static esp_err_t lcd_send(int dc,const void *data,size_t length)
+static esp_err_t lcd_send(int dc,const void *data,size_t length,uint32_t hz)
 {
     if (!length) return ESP_OK;
     gpio_set_level(CHART_LCD_DC,dc);
-    spi_transaction_t t={.length=length*8,.tx_buffer=data};
-    return spi_device_polling_transmit(lcd,&t);
+    spi_transaction_t t={.length=length*8,.tx_buffer=data,.override_freq_hz=hz};
+    if (length<=sizeof(t.tx_data)) {
+        t.flags=SPI_TRANS_USE_TXDATA;
+        memcpy(t.tx_data,data,length);
+        return spi_device_polling_transmit(lcd,&t);
+    }
+    if (length<=lcd_dma_max)
+        return spi_device_transmit(lcd,&t);
+    /* Larger tiles span transactions; keep CS asserted and wait before reuse. */
+    TRY(spi_device_acquire_bus(lcd,portMAX_DELAY));
+    const uint8_t *bytes=data;
+    esp_err_t err=ESP_OK;
+    while (length && err==ESP_OK) {
+        size_t n=length<lcd_dma_max ? length : lcd_dma_max;
+        t=(spi_transaction_t){.length=n*8,.tx_buffer=bytes,
+            .flags=length>n ? SPI_TRANS_CS_KEEP_ACTIVE : 0,.override_freq_hz=hz};
+        err=spi_device_transmit(lcd,&t);
+        bytes+=n; length-=n;
+    }
+    spi_device_release_bus(lcd);
+    return err;
 }
 
 static esp_err_t lcd_command(uint8_t command,const uint8_t *data,size_t n)
 {
-    TRY(lcd_send(0,&command,1));
-    return lcd_send(1,data,n);
+    TRY(lcd_send(0,&command,1,CHART_LCD_SPI_HZ));
+    return lcd_send(1,data,n,CHART_LCD_SPI_HZ);
 }
 
 esp_err_t chart_lcd_init(void)
 {
+    ESP_LOGI("lcd","SPI MOSI=%d SCK=%d CS=%d DC=%d Hz=%d",
+        CHART_LCD_MOSI,CHART_LCD_SCK,CHART_LCD_CS,CHART_LCD_DC,CHART_LCD_SPI_HZ);
+    if (CHART_LCD_BL<0)
+        ESP_LOGW("lcd","BL is not driven; backlight circuit and polarity must be verified externally");
     gpio_config_t io={.pin_bit_mask=1ULL<<CHART_LCD_DC,.mode=GPIO_MODE_OUTPUT};
     if (CHART_LCD_BL>=0) io.pin_bit_mask|=1ULL<<(CHART_LCD_BL & 63);
     TRY(gpio_config(&io));
     if (CHART_LCD_BL>=0) gpio_set_level(CHART_LCD_BL,!CHART_LCD_BL_ACTIVE);
     spi_bus_config_t bus={.mosi_io_num=CHART_LCD_MOSI,.miso_io_num=-1,
         .sclk_io_num=CHART_LCD_SCK,.quadwp_io_num=-1,.quadhd_io_num=-1,
-        .max_transfer_sz=320*CHART_TILE_ROWS*2};
+        .max_transfer_sz=320*(CHART_LCD_REFRESH_TEST ? CHART_LCD_REFRESH_ROWS : CHART_TILE_ROWS)*2};
     TRY(spi_bus_initialize(SPI2_HOST,&bus,SPI_DMA_CH_AUTO));
-    spi_device_interface_config_t device={.clock_speed_hz=CHART_LCD_SPI_HZ,
+    spi_device_interface_config_t device={
+        .clock_speed_hz=CHART_LCD_REFRESH_TEST ? CHART_LCD_FAST_SPI_HZ : CHART_LCD_SPI_HZ,
         .mode=0,.spics_io_num=CHART_LCD_CS,.queue_size=1};
     TRY(spi_bus_add_device(SPI2_HOST,&device,&lcd));
+    TRY(spi_bus_get_max_transaction_len(SPI2_HOST,&lcd_dma_max));
+    lcd_dma_max&=~(size_t)3; /* Aligned DMA buffers and complete RGB565 pixels. */
     /* Conservative ST7796 DCS bring-up. Vendor power/gamma table is not verified. */
-    TRY(lcd_command(0x01,NULL,0)); vTaskDelay(pdMS_TO_TICKS(150));
+    TRY(lcd_command(0x01,NULL,0));
+    int actual_khz=0;
+    TRY(spi_device_get_actual_freq(lcd,&actual_khz));
+    ESP_LOGI("lcd","actual initialization/command SPI clock: %d kHz",actual_khz);
+    vTaskDelay(pdMS_TO_TICKS(150));
     TRY(lcd_command(0x11,NULL,0)); vTaskDelay(pdMS_TO_TICKS(120));
     uint8_t format=0x55;
     TRY(lcd_command(0x3a,&format,1));
     uint8_t orientation=CHART_LCD_ROTATION==90 ? 0x60 :
         CHART_LCD_ROTATION==180 ? 0xc0 : CHART_LCD_ROTATION==270 ? 0xa0 : 0x00;
+    if (CHART_LCD_MIRROR_X) orientation^=(orientation & 0x20) ? 0x80 : 0x40;
     if (CHART_LCD_BGR) orientation|=0x08;
     TRY(lcd_command(0x36,&orientation,1));
     TRY(lcd_command(CHART_LCD_INVERT ? 0x21 : 0x20,NULL,0));
     TRY(lcd_command(0x29,NULL,0)); vTaskDelay(pdMS_TO_TICKS(20));
     if (CHART_LCD_BL>=0) gpio_set_level(CHART_LCD_BL,CHART_LCD_BL_ACTIVE);
-    ESP_LOGW("lcd","ST7796 DCS candidate; window offset %d,%d BGR=%d rotation=%d: verify on module",
-        CHART_LCD_X_OFFSET,CHART_LCD_Y_OFFSET,CHART_LCD_BGR,CHART_LCD_ROTATION);
+    ESP_LOGI("lcd","pixel transfer: synchronous DMA; max tile=%d rows; aligned transaction limit=%u bytes",
+        CHART_LCD_REFRESH_TEST ? CHART_LCD_REFRESH_ROWS : CHART_TILE_ROWS,(unsigned)lcd_dma_max);
+    ESP_LOGW("lcd","ST7796 DCS candidate; window offset %d,%d BGR=%d rotation=%d mirror_x=%d MADCTL=0x%02x: verify on module",
+        CHART_LCD_X_OFFSET,CHART_LCD_Y_OFFSET,CHART_LCD_BGR,CHART_LCD_ROTATION,
+        CHART_LCD_MIRROR_X,orientation);
     return ESP_OK;
+}
+
+static esp_err_t lcd_tile_write(int y,int rows,uint16_t *pixels,chart_lcd_write_mode_t mode,
+                               chart_lcd_timing_t *timing)
+{
+    int x1=CHART_LCD_X_OFFSET,x2=x1+319,y1=CHART_LCD_Y_OFFSET+y,y2=y1+rows-1;
+    uint8_t xs[]={x1>>8,x1&255,x2>>8,x2&255}, ys[]={y1>>8,y1&255,y2>>8,y2&255};
+    if (timing) *timing=(chart_lcd_timing_t){0};
+    int64_t started=timing ? esp_timer_get_time() : 0;
+    TRY(lcd_command(0x2a,xs,sizeof(xs)));
+    TRY(lcd_command(0x2b,ys,sizeof(ys)));
+    int64_t addressed=timing ? esp_timer_get_time() : 0;
+    if (mode==CHART_LCD_WRITE_SWAP_O2) lcd_swap_optimized(pixels,320*rows);
+    else if (mode==CHART_LCD_WRITE_SWAP) lcd_swap_baseline(pixels,320*rows);
+    int64_t swapped=timing ? esp_timer_get_time() : 0;
+    TRY(lcd_command(0x2c,NULL,0));
+    if (timing) TRY(spi_device_get_actual_freq(lcd,&timing->command_khz));
+    int64_t commanded=timing ? esp_timer_get_time() : 0;
+    esp_err_t err=lcd_send(1,pixels,320*rows*2,lcd_pixel_hz);
+    if (timing) {
+        timing->swap_us=mode==CHART_LCD_WRITE_WIRE ? 0 : swapped-addressed;
+        timing->command_us=addressed-started+commanded-swapped;
+        timing->dma_us=esp_timer_get_time()-commanded;
+        if (err==ESP_OK) TRY(spi_device_get_actual_freq(lcd,&timing->pixel_khz));
+    }
+    return err;
+}
+
+void chart_lcd_fast_pixels(bool enabled)
+{
+    lcd_pixel_hz=enabled ? CHART_LCD_FAST_SPI_HZ : CHART_LCD_SPI_HZ;
 }
 
 esp_err_t chart_lcd_tile(int y,int rows,uint16_t *pixels)
 {
-    int x1=CHART_LCD_X_OFFSET,x2=x1+319,y1=CHART_LCD_Y_OFFSET+y,y2=y1+rows-1;
-    uint8_t xs[]={x1>>8,x1&255,x2>>8,x2&255}, ys[]={y1>>8,y1&255,y2>>8,y2&255};
-    TRY(lcd_command(0x2a,xs,sizeof(xs)));
-    TRY(lcd_command(0x2b,ys,sizeof(ys)));
-    for (int i=0;i<320*rows;++i) pixels[i]=(pixels[i]<<8)|(pixels[i]>>8);
-    TRY(lcd_command(0x2c,NULL,0));
-    return lcd_send(1,pixels,320*rows*2);
+    return lcd_tile_write(y,rows,pixels,CHART_LCD_WRITE_SWAP,NULL);
+}
+
+esp_err_t chart_lcd_tile_profiled(int y,int rows,uint16_t *pixels,chart_lcd_write_mode_t mode,
+                                 chart_lcd_timing_t *timing)
+{
+    return lcd_tile_write(y,rows,pixels,mode,timing);
 }
 
 static esp_err_t imu_write(uint8_t address,uint8_t value)
@@ -207,3 +293,5 @@ esp_err_t chart_wifi_start(QueueHandle_t queue,char source[33],int *frequency)
         best.bssid[0],best.bssid[1],best.bssid[2],best.bssid[3],best.bssid[4],best.bssid[5],best.primary,*frequency);
     return result;
 }
+
+#endif
