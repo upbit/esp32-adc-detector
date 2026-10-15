@@ -7,7 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 #ifndef CHART_LCD_HOST_TEST
-#include "driver/gpio.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -15,8 +14,6 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #endif
-
-#if !CHART_LCD_REFRESH_TEST
 
 #ifndef CHART_LCD_HOST_TEST
 typedef enum { CMD_MODE, CMD_ANGLE, CMD_AUTO, CMD_SIGNAL, CMD_CLEAR, CMD_ZERO, CMD_CAL } command_type_t;
@@ -312,11 +309,22 @@ static display_rect_iterator_t display_rect_plan(const chart_dirty_mask_t *mask)
     return plan;
 }
 
+#if CHART_RENDER_BENCHMARK
+/* The renderer must not include platform headers, so it calls back for time. */
+int64_t chart_bench_now(void) { return esp_timer_get_time(); }
+#endif
+
 static void display_draw(const chart_model_t *snapshot,int64_t now,display_rect_t rect,
                          int offset,int rows,uint16_t *pixels,bool in_flight,display_work_t *work)
 {
     int64_t started=esp_timer_get_time();
     chart_render_rect(snapshot,now,rect.x,rect.y+offset,rect.width,rows,pixels);
+#if CHART_LCD_SHIFT_DIAGNOSTIC
+    /* Overlay inside the rectangle's own buffer, using rectangle-local rows, so
+     * the bands travel the same pixel path as everything else. */
+    chart_render_diag_ruler(rect.x,rect.y+offset,rect.width,rows,pixels);
+    chart_render_diag_swatches(rect.x,rect.y+offset,rect.width,rows,pixels,NULL);
+#endif
     int64_t elapsed=esp_timer_get_time()-started;
     work->draw_us+=elapsed;
     if (in_flight) work->overlap_draw_us+=elapsed;
@@ -401,6 +409,24 @@ static esp_err_t display_update(displayed_state_t *displayed,const chart_model_t
     return ESP_OK;
 }
 
+#if CHART_LCD_BOOT_DIAGNOSTIC
+static esp_err_t display_boot_pattern(uint16_t *pixels)
+{
+    chart_lcd_fast_pixels(false);
+    for (int y=0;y<320;y+=CHART_TILE_ROWS) {
+        int rows=320-y<CHART_TILE_ROWS ? 320-y : CHART_TILE_ROWS;
+        chart_render_test_tile(y,rows,pixels);
+        esp_err_t err=chart_lcd_window_begin(0,y,320,rows);
+        if (err!=ESP_OK) return err;
+        err=chart_lcd_window_submit(pixels,rows,true);
+        esp_err_t ended=chart_lcd_window_end(NULL);
+        if (err!=ESP_OK) return err;
+        if (ended!=ESP_OK) return ended;
+    }
+    return ESP_OK;
+}
+#endif
+
 #ifndef CHART_LCD_HOST_TEST
 static void render_task(void *arg)
 {
@@ -418,10 +444,11 @@ static void render_task(void *arg)
 #if CHART_LCD_BOOT_DIAGNOSTIC
     /* Colour/boundary check stays available but off by default; see plan P0-D. */
     ESP_LOGI("lcd","sending full-screen RGB/white boot test pattern");
-    for (int y=0;y<320;y+=CHART_TILE_ROWS) {
-        int rows=320-y<CHART_TILE_ROWS ? 320-y : CHART_TILE_ROWS;
-        chart_render_test_tile(y,rows,pixels);
-        ESP_ERROR_CHECK(chart_lcd_tile(y,rows,pixels));
+    err=display_boot_pattern(pixels);
+    if (err!=ESP_OK) {
+        ESP_LOGE("lcd","diagnostic stopped: %s; no pixel reuse",esp_err_to_name(err));
+        free(snapshot); free(displayed);
+        vTaskDelete(NULL); return;
     }
     ESP_LOGI("lcd","test pattern sent over SPI (no panel readback); holding for %d ms",CHART_LCD_TEST_MS);
     vTaskDelay(pdMS_TO_TICKS(CHART_LCD_TEST_MS));
@@ -436,6 +463,30 @@ static void render_task(void *arg)
     ESP_LOGI("lcd","starting dirty star chart; command=%d MHz pixel=%d MHz pixels=%d snapshot=%u displayed=%u stack=6144",
         CHART_LCD_SPI_HZ/1000000,CHART_LCD_FAST_SPI_HZ/1000000,CHART_LCD_PIXEL_BYTES,
         (unsigned)sizeof(*snapshot),(unsigned)sizeof(*displayed));
+#if CHART_RENDER_BENCHMARK
+    {   /* Attribute the draw cost once, on a populated snapshot, before the
+         * loop starts competing with pose/signal tasks for the CPU. */
+        lock(); memcpy(snapshot,&model,sizeof(model)); unlock();
+        chart_render_cost_t cost;
+        chart_render_benchmark(snapshot,esp_timer_get_time(),pixels,&cost);
+        ESP_LOGW("bench","320x32 band: clear=%lld static=%lld bins=%lld peak=%lld trend=%lld text=%lld us; whole scene=%lld us; sum_parts=%lld us",
+            (long long)cost.clear_us,(long long)cost.static_us,(long long)cost.bins_us,
+            (long long)cost.peak_us,(long long)cost.trend_us,(long long)cost.text_us,
+            (long long)cost.scene_us,
+            (long long)(cost.static_us+cost.bins_us+cost.peak_us+cost.trend_us+cost.text_us));
+        ESP_LOGW("bench","a 320x320 frame is 10 such bands: scene would be ~%lld us if cost scaled with area",
+            (long long)(cost.scene_us*10));
+        ESP_LOGW("bench","fixed cost of one chart_render_rect call (1x1) = %lld us; a 25-rect dirty frame pays this 25x = %lld us",
+            (long long)cost.fixed_call_us,(long long)(cost.fixed_call_us*25));
+        ESP_LOGW("bench","primitives per 4096 ops: float_mul=%lld float_div=%lld sqrtf=%lld sinf=%lld int_muldiv=%lld us (no FPU: RVFPLIB)",
+            (long long)cost.float_mul_us,(long long)cost.float_div_us,(long long)cost.sqrtf_us,
+            (long long)cost.sinf_us,(long long)cost.int_muldiv_us);
+        ESP_LOGW("bench","ns per op: float_mul=%lld float_div=%lld sqrtf=%lld sinf=%lld int_muldiv=%lld (sink=%d)",
+            (long long)(cost.float_mul_us*1000/4096),(long long)(cost.float_div_us*1000/4096),
+            (long long)(cost.sqrtf_us*1000/4096),(long long)(cost.sinf_us*1000/4096),
+            (long long)(cost.int_muldiv_us*1000/4096),(int)cost.sink);
+    }
+#endif
     for (;;) {
         int64_t started=esp_timer_get_time();
         lock(); memcpy(snapshot,&model,sizeof(model)); unlock();
@@ -531,163 +582,4 @@ void app_main(void)
     }
 }
 
-#endif
-#else
-
-typedef struct { unsigned id; const char *label; bool window,pipeline,o2; } refresh_strategy_t;
-static const refresh_strategy_t refresh_strategies[]={
-    {14,"14 WINDOW PIPE16",true,true,false},
-    {15,"15 FRAME O2",true,true,true},
-    {10,"10 WIRE 80M MAX",false,false,false},
-    {13,"13 WINDOW SYNC",true,false,false},
-};
-
-static bool refresh_button_pressed(int64_t now)
-{
-    static bool raw=true,stable=true;
-    static int64_t changed;
-    bool level=gpio_get_level(CHART_LCD_BUTTON)!=0;
-    if (level!=raw) { raw=level; changed=now; }
-    if (raw==stable || now-changed<CHART_LCD_BUTTON_DEBOUNCE_US) return false;
-    stable=raw;
-    return !stable;
-}
-
-static void refresh_add_timing(chart_lcd_timing_t *total,const chart_lcd_timing_t *t)
-{
-    total->swap_us+=t->swap_us; total->command_us+=t->command_us;
-    total->dma_us+=t->dma_us; total->wait_us+=t->wait_us;
-    if (t->command_khz) total->command_khz=t->command_khz;
-    if (t->pixel_khz) total->pixel_khz=t->pixel_khz;
-}
-
-#define REFRESH_FRAME_FN refresh_frame
-#define REFRESH_WINDOW_FN(name) chart_lcd_window_##name
-#define REFRESH_FRAME_ATTR
-#include "lcd_refresh_frame.inc"
-#undef REFRESH_FRAME_FN
-#undef REFRESH_WINDOW_FN
-#undef REFRESH_FRAME_ATTR
-
-#define REFRESH_FRAME_FN refresh_frame_o2
-#define REFRESH_WINDOW_FN(name) chart_lcd_window_##name
-#if defined(__GNUC__) && !defined(__clang__)
-#define REFRESH_FRAME_ATTR __attribute__((optimize("O2"),noinline))
-#else
-#define REFRESH_FRAME_ATTR
-#endif
-#include "lcd_refresh_frame.inc"
-#undef REFRESH_FRAME_FN
-#undef REFRESH_WINDOW_FN
-#undef REFRESH_FRAME_ATTR
-
-#ifndef CHART_LCD_HOST_TEST
-static void render_task(void *arg)
-{
-    (void)arg;
-    uint16_t *pixels=heap_caps_malloc(CHART_LCD_PIXEL_BYTES,MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);
-    if (!pixels) { ESP_LOGE("lcd","tile allocation failed"); vTaskDelete(NULL); return; }
-    ESP_ERROR_CHECK(chart_lcd_init());
-    gpio_config_t button={.pin_bit_mask=1ULL<<CHART_LCD_BUTTON,.mode=GPIO_MODE_INPUT,
-        .pull_up_en=GPIO_PULLUP_ENABLE};
-    ESP_ERROR_CHECK(gpio_config(&button));
-    unsigned strategy_index=0;
-    const refresh_strategy_t *strategy=&refresh_strategies[0];
-    bool setup=true;
-    unsigned frame=0,report_frames=0;
-    bool footer=false;
-    float fps=0;
-    int64_t epoch=esp_timer_get_time(),report_started=epoch,draw_us=0,spi_us=0,max_us=0;
-    chart_lcd_timing_t totals={0};
-    int64_t bytes=0;
-    int64_t last_start=0,interval_min=INT64_MAX,interval_max=0;
-    int64_t dynamic_us=0,dynamic_max=0;
-    ESP_LOGI("lcd","P3 adapted demo (not historical baseline); BOOT cycles 14/15/10/13; command=%d MHz pixel=%d MHz dynamic=320x128; UI/IMU/Wi-Fi disabled; buffer=%d bytes",
-        CHART_LCD_SPI_HZ/1000000,CHART_LCD_FAST_SPI_HZ/1000000,CHART_LCD_PIXEL_BYTES);
-    for (;;) {
-        if (refresh_button_pressed(esp_timer_get_time())) {
-            strategy_index=(strategy_index+1)%(sizeof(refresh_strategies)/sizeof(*refresh_strategies));
-            strategy=&refresh_strategies[strategy_index];
-            setup=true;
-        }
-        if (setup) {
-            setup=false;
-            chart_lcd_fast_pixels(false);
-            for (int y=0;y<320;y+=CHART_TILE_ROWS) {
-                chart_render_refresh_tile(y,CHART_TILE_ROWS,pixels,strategy->label,0,0,0);
-                ESP_ERROR_CHECK(chart_lcd_tile(y,CHART_TILE_ROWS,pixels));
-            }
-            chart_lcd_fast_pixels(true);
-            frame=report_frames=0; footer=false; fps=0;
-            epoch=report_started=esp_timer_get_time();
-            last_start=0; interval_min=INT64_MAX; interval_max=0;
-            draw_us=spi_us=max_us=bytes=dynamic_us=dynamic_max=0;
-            totals=(chart_lcd_timing_t){0};
-            ESP_LOGI("lcd","strategy=%u %s window=%d pipeline=%d hot_o2=%d rows=%d",
-                strategy->id,strategy->label,strategy->window,strategy->pipeline,strategy->o2,
-                strategy->window ? CHART_TILE_ROWS : CHART_LCD_REFRESH_ROWS);
-        }
-        int64_t started=esp_timer_get_time(),elapsed=started-epoch;
-        if (last_start) {
-            int64_t interval=started-last_start;
-            if (interval<interval_min) interval_min=interval;
-            if (interval>interval_max) interval_max=interval;
-        }
-        last_start=started;
-        int64_t frame_draw=0,frame_spi=0;
-        esp_err_t err=strategy->o2 ?
-            refresh_frame_o2(strategy,pixels,elapsed,frame,&frame_draw,&frame_spi,&totals) :
-            refresh_frame(strategy,pixels,elapsed,frame,&frame_draw,&frame_spi,&totals);
-        if (err!=ESP_OK) {
-            ESP_LOGE("lcd","strategy=%u transfer stopped: %s",strategy->id,esp_err_to_name(err));
-            /* No more commands or buffer reuse after a failed/partial window. */
-            vTaskDelete(NULL); return;
-        }
-        int64_t dynamic=esp_timer_get_time()-started;
-        dynamic_us+=dynamic;
-        if (dynamic>dynamic_max) dynamic_max=dynamic;
-        bytes+=320*CHART_LCD_REFRESH_HEIGHT*2;
-        if (footer) {
-            footer=false;
-            for (int y=240;y<272;y+=CHART_TILE_ROWS) {
-                int64_t drawing=esp_timer_get_time();
-                chart_render_refresh_tile(y,CHART_TILE_ROWS,pixels,strategy->label,fps,elapsed,frame);
-                int64_t drawn=esp_timer_get_time();
-                chart_lcd_timing_t timing={0};
-                ESP_ERROR_CHECK(chart_lcd_tile_profiled(y,CHART_TILE_ROWS,pixels,CHART_LCD_WRITE_SWAP_O2,&timing));
-                refresh_add_timing(&totals,&timing);
-                frame_draw+=drawn-drawing; frame_spi+=esp_timer_get_time()-drawn;
-                bytes+=320*CHART_TILE_ROWS*2;
-            }
-        }
-        int64_t finished=esp_timer_get_time();
-        ++frame; ++report_frames;
-        draw_us+=frame_draw; spi_us+=frame_spi;
-        if (finished-started>max_us) max_us=finished-started;
-        if (finished-report_started>=1000000) {
-            fps=report_frames*1000000.0f/(finished-report_started);
-            ESP_LOGI("lcd","perf strategy=%u fps=%.2f draw=%.2f ms/frame spi=%.2f ms/frame max_work=%.2f ms payload=%.2f MB/s frames=%u interval=%.2f..%.2f ms swap=%.3f cmd=%.3f dma=%.3f ms/frame heap=%u min_heap=%u stack_free=%u clocks=%d/%d kHz dynamic=%.3f max_dynamic=%.3f wait=%.3f ms/frame",
-                strategy->id,fps,draw_us/(1000.0f*report_frames),spi_us/(1000.0f*report_frames),
-                max_us/1000.0f,bytes/(double)(finished-report_started),frame,
-                interval_min==INT64_MAX ? 0 : interval_min/1000.0f,interval_max/1000.0f,
-                totals.swap_us/(1000.0f*report_frames),totals.command_us/(1000.0f*report_frames),
-                totals.dma_us/(1000.0f*report_frames),(unsigned)esp_get_free_heap_size(),
-                (unsigned)esp_get_minimum_free_heap_size(),(unsigned)uxTaskGetStackHighWaterMark(NULL),
-                totals.command_khz,totals.pixel_khz,dynamic_us/(1000.0f*report_frames),
-                dynamic_max/1000.0f,totals.wait_us/(1000.0f*report_frames));
-            report_started=finished; report_frames=0;
-            draw_us=spi_us=max_us=bytes=0; footer=true;
-            interval_min=INT64_MAX; interval_max=0;
-            totals=(chart_lcd_timing_t){0};
-            dynamic_us=dynamic_max=0;
-        }
-    }
-}
-
-void app_main(void)
-{
-    configASSERT(xTaskCreate(render_task,"display",6144,NULL,1,NULL)==pdPASS);
-}
-
-#endif
 #endif

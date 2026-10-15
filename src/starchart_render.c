@@ -61,6 +61,28 @@ static void pixel(int x, int y, color_t c, unsigned alpha)
     *p=(r>>3)<<11 | (g>>2)<<5 | (b>>3);
 }
 
+/* Whole-element rejection. render_scene walks every element's geometry on each
+ * call and relies on pixel() to discard what falls outside the rectangle, so a
+ * dirty frame of N rectangles paid for the whole scene N times: measured on
+ * hardware at 2579 us of fixed cost per chart_render_rect call, independent of
+ * rectangle size. Testing an element's bounding box first skips the arc/line/
+ * disc stepping entirely, and with it the softfloat trig that costs 7417 ns per
+ * sinf on this FPU-less target. Returns false while marking dirty cells, where
+ * coverage must stay complete. */
+static bool box_hidden(float left,float top,float right,float bottom)
+{
+    if (dirty_target) return false;
+    return right<tile_x || left>=tile_x+tile_width ||
+           bottom<tile_y || top>=tile_y+tile_rows;
+}
+
+/* Same test for a full circle of radius r, padded by the stroke width. */
+static bool ring_hidden(float r,float padding)
+{
+    return box_hidden(CHART_CENTER_X-r-padding,CHART_CENTER_Y-r-padding,
+                      CHART_CENTER_X+r+padding,CHART_CENTER_Y+r+padding);
+}
+
 static void disc(float x, float y, float radius, color_t c)
 {
     if (dirty_target) {
@@ -353,21 +375,28 @@ static void render_scene(const chart_model_t *m,int64_t now,uint64_t elements)
 {
     if (elements&ELEMENT(ELEMENT_STATIC)) {
         /* Inner grid rings scale with the outer ring: 0.26 and 0.47 and 0.68 of R. */
-        for (int r=29;r<=86;r+=r==29 ? 28 : 29)
+        for (int r=29;r<=86;r+=r==29 ? 28 : 29) {
+            if (ring_hidden((float)r,1.8f)) continue;
             for (int a=0;a<360;a+=8) arc(a,a+3,r,0.8f,grid);
+        }
         line(CHART_CENTER_X-CHART_OUTER_R+6,CHART_CENTER_Y,
              CHART_CENTER_X+CHART_OUTER_R-6,CHART_CENTER_Y,0.7f,grid);
         line(CHART_CENTER_X,CHART_CENTER_Y-CHART_OUTER_R+6,
              CHART_CENTER_X,CHART_CENTER_Y+CHART_OUTER_R-6,0.7f,grid);
         arc(0,360,CHART_OUTER_R,0.9f,mix(grid,muted,0.25f));
-        for (int a=0;a<360;a+=10) {
-            float x1,y1,x2,y2;
-            polar(a,CHART_OUTER_R-2,&x1,&y1);
-            polar(a,a%30 ? CHART_OUTER_R+1 : CHART_OUTER_R+4,&x2,&y2);
-            line(x1,y1,x2,y2,0.9f,mix(grid,muted,0.35f));
-        }
+        /* Ticks reach CHART_OUTER_R+4; skip all 36 when none can be visible. */
+        if (!ring_hidden((float)CHART_OUTER_R+4,1.9f))
+            for (int a=0;a<360;a+=10) {
+                float x1,y1,x2,y2;
+                polar(a,CHART_OUTER_R-2,&x1,&y1);
+                polar(a,a%30 ? CHART_OUTER_R+1 : CHART_OUTER_R+4,&x2,&y2);
+                line(x1,y1,x2,y2,0.9f,mix(grid,muted,0.35f));
+            }
         /* Fixed antenna cone: a solid wedge fading outward, not a radar sweep. */
-        {
+        if (!box_hidden((float)CHART_CENTER_X-(CHART_SAMPLE_R-6.0f),
+                        (float)CHART_CENTER_Y-(CHART_SAMPLE_R-6.0f)-1.0f,
+                        (float)CHART_CENTER_X+(CHART_SAMPLE_R-6.0f),
+                        (float)CHART_CENTER_Y)) {
             const float half_angle=11.0f, reach=CHART_SAMPLE_R-6.0f;
             int top=CHART_CENTER_Y-(int)reach-1;
             if (top<tile_y) top=tile_y;
@@ -395,6 +424,9 @@ static void render_scene(const chart_model_t *m,int64_t now,uint64_t elements)
             }
         }
     }
+    /* Every bin sits on the sample ring; the widest halo is width+6, so ~9 px
+     * of padding bounds them all. One test replaces 36 arc_in_tile calls. */
+    if (!ring_hidden((float)CHART_SAMPLE_R,9.0f))
     for (int i=0;i<CHART_BINS;++i) {
         if (!(elements&ELEMENT(i))) continue;
         const chart_bin_t *b=&m->bins[i],*next=&m->bins[(i+1)%CHART_BINS];
@@ -584,10 +616,149 @@ void chart_mark_dirty(const chart_model_t *previous,int64_t previous_time,
     dirty_target=NULL;
 }
 
+#if CHART_RENDER_BENCHMARK
+/* One-shot draw-cost breakdown; compiled out by default. Splits a band into the
+ * parts we suspect so a frame time can be attributed before optimising, and
+ * times raw float primitives because this target has no FPU and every float
+ * operation is a library call. The caller's buffer is one DMA region
+ * (CHART_LCD_PIPE_ROWS tall), not a frame, so the band is that tall. */
+void chart_render_benchmark(const chart_model_t *m,int64_t now,uint16_t *buffer,
+                            chart_render_cost_t *out)
+{
+    const int rows=CHART_LCD_PIPE_ROWS;
+    int64_t s=chart_bench_now();
+    set_tile(buffer,0,0,320,rows);
+    for (int j=0;j<320*rows;++j) tile[j]=pack(bg);
+    out->clear_us=chart_bench_now()-s;
+
+    struct { uint64_t mask; int64_t *slot; } parts[]={
+        {ELEMENT(ELEMENT_STATIC),&out->static_us},
+        {ELEMENT(ELEMENT_TREND)|ELEMENT(ELEMENT_COVERAGE),&out->trend_us},
+        {ELEMENT(ELEMENT_NAME)|ELEMENT(ELEMENT_FREQUENCY)|ELEMENT(ELEMENT_RSSI)|
+         ELEMENT(ELEMENT_SIM)|ELEMENT(ELEMENT_ANGLE)|ELEMENT(ELEMENT_STATUS),&out->text_us},
+        {ELEMENT(ELEMENT_PEAK),&out->peak_us},
+    };
+    uint64_t bins=0;
+    for (int i=0;i<CHART_BINS;++i) bins|=ELEMENT(i);
+    for (unsigned i=0;i<sizeof(parts)/sizeof(*parts);++i) {
+        set_tile(buffer,0,0,320,rows);
+        s=chart_bench_now(); render_scene(m,now,parts[i].mask);
+        *parts[i].slot=chart_bench_now()-s;
+    }
+    set_tile(buffer,0,0,320,rows);
+    s=chart_bench_now(); render_scene(m,now,bins); out->bins_us=chart_bench_now()-s;
+    set_tile(buffer,0,0,320,rows);
+    s=chart_bench_now(); render_scene(m,now,ELEMENT(ELEMENT_COUNT)-1);
+    out->scene_us=chart_bench_now()-s;
+
+    /* Fixed per-call cost: a 1x1 rect walks all geometry and discards it. */
+    s=chart_bench_now();
+    for (int r=0;r<16;++r) chart_render_rect(m,now,0,0,1,1,buffer);
+    out->fixed_call_us=(chart_bench_now()-s)/16;
+
+    /* Raw primitive costs, 4096 iterations each; volatile defeats folding. */
+    volatile float sink=0; float acc=0;
+    s=chart_bench_now();
+    for (int r=0;r<4096;++r) acc+=(float)r*1.000001f;
+    sink=acc; out->float_mul_us=chart_bench_now()-s;
+    s=chart_bench_now();
+    for (int r=0;r<4096;++r) acc+=(float)r/1.000001f;
+    sink=acc; out->float_div_us=chart_bench_now()-s;
+    s=chart_bench_now();
+    for (int r=0;r<4096;++r) acc+=sqrtf((float)r);
+    sink=acc; out->sqrtf_us=chart_bench_now()-s;
+    s=chart_bench_now();
+    for (int r=0;r<4096;++r) acc+=sinf((float)r*0.001f);
+    sink=acc; out->sinf_us=chart_bench_now()-s;
+    int iacc=0;
+    s=chart_bench_now();
+    for (int r=0;r<4096;++r) iacc+=r*7/3;
+    out->int_muldiv_us=chart_bench_now()-s;
+    out->sink=(float)sink+(float)iacc;
+}
+#endif
+
 void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_t *buffer)
 {
     chart_render_rect(m,now,0,y,320,rows,buffer);
 }
+
+#if CHART_LCD_SHIFT_DIAGNOSTIC
+/* Temporary 80 MHz colour experiment; retained behind a compile switch. Amber is the
+ * only palette colour with a saturated red channel and live G/B bits, so the
+ * cyan/white/muted/grid neighbours act as its controls. */
+static const color_t *diag_swatch(int index)
+{
+    static const color_t *const swatches[CHART_DIAG_SWATCHES]=
+        {&amber,&cyan,&white,&muted,&grid};
+    if (index<0 || index>=CHART_DIAG_SWATCHES) return NULL;
+    return swatches[index];
+}
+
+uint16_t chart_diag_swatch_word(int index)
+{
+    const color_t *c=diag_swatch(index);
+    return c ? pack(*c) : 0;
+}
+
+const char *chart_diag_swatch_name(int index)
+{
+    static const char *const names[CHART_DIAG_SWATCHES]=
+        {"amber","cyan","white","muted","grid"};
+    if (index<0 || index>=CHART_DIAG_SWATCHES) return "?";
+    return names[index];
+}
+
+/* Writes a raw RGB565 word, bypassing colour_t so single-bit values survive. */
+static void raw_pixel(int x,int y,uint16_t word)
+{
+    if (x<tile_x || x>=tile_x+tile_width || y<tile_y || y>=tile_y+tile_rows) return;
+    tile[(y-tile_y)*tile_width+(x-tile_x)]=word;
+}
+
+/* Bit ruler: block k carries only bit k, so a stream shifted by n bits shows
+ * the pattern slid n blocks left. Reading it needs counting, not colour
+ * judgement, which a camera's white balance cannot distort. */
+void chart_render_diag_ruler(int x,int y,int width,int rows,uint16_t *buffer)
+{
+    if (x<0 || y<0 || width<=0 || width>320-x || rows<=0 || rows>320-y) return;
+    const int top=CHART_DIAG_RULER_Y,bottom=top+CHART_DIAG_RULER_ROWS;
+    if (y>=bottom || y+rows<=top) return;
+    set_tile(buffer,x,y,width,rows);
+    int from=y>top ? y : top,to=y+rows<bottom ? y+rows : bottom;
+    for (int py=from;py<to;++py)
+        for (int i=0;i<16;++i) {
+            /* 0x0000/0xffff are rotation fixed points: the scale stays valid
+             * however far the stream has shifted. */
+            uint16_t word=py<top+CHART_DIAG_RULER_SCALE ? (i%2 ? 0xffff : 0x0000)
+                                                        : (uint16_t)(1u<<i);
+            for (int x=i*CHART_DIAG_RULER_W;x<(i+1)*CHART_DIAG_RULER_W;++x)
+                raw_pixel(x,py,word);
+        }
+}
+
+/* Overlays the swatch band onto whichever tile covers it; other rows untouched. */
+void chart_render_diag_swatches(int x,int y,int width,int rows,uint16_t *buffer,const char *label)
+{
+    if (x<0 || y<0 || width<=0 || width>320-x || rows<=0 || rows>320-y) return;
+    const int top=CHART_DIAG_SWATCH_Y,bottom=top+CHART_DIAG_SWATCH_ROWS;
+    if (y>=bottom || y+rows<=top) return;
+    set_tile(buffer,x,y,width,rows);
+    int from=y>top ? y : top,to=y+rows<bottom ? y+rows : bottom;
+    for (int py=from;py<to;++py) {
+        for (int i=0;i<CHART_DIAG_SWATCHES;++i) {
+            const color_t *c=diag_swatch(i);
+            for (int x=i*CHART_DIAG_SWATCH_W;x<(i+1)*CHART_DIAG_SWATCH_W;++x)
+                pixel(x,py,*c,15);
+        }
+        /* Keep the label area flat so no swatch is tinted by text pixels. */
+        for (int x=CHART_DIAG_SWATCHES*CHART_DIAG_SWATCH_W;x<320;++x) pixel(x,py,bg,15);
+    }
+    if (label) text(label,CHART_DIAG_SWATCHES*CHART_DIAG_SWATCH_W+3,
+                    top+CHART_DIAG_SWATCH_ROWS-2-ink_bottom(CHART_FONT_TICK),
+                    CHART_FONT_TICK,white,320);
+}
+#endif /* CHART_LCD_SHIFT_DIAGNOSTIC */
 
 void chart_render_test_tile(int y,int rows,uint16_t *buffer)
 {
@@ -604,87 +775,3 @@ void chart_render_test_tile(int y,int rows,uint16_t *buffer)
     centered("天线",174,14,cyan);
 }
 
-void chart_render_test_overlay(int y,int rows,uint16_t *buffer,const char *label,unsigned frame)
-{
-    set_tile(buffer,0,y,320,rows);
-    for (int py=y<299 ? 299 : y;py<y+rows;++py)
-        for (int x=0;x<320;++x) pixel(x,py,bg,15);
-    int x=(frame*6)%318;
-    for (int dx=0;dx<3;++dx) pixel(x+dx,299,cyan,15);
-    centered(label,302,14,cyan);
-}
-
-void chart_render_refresh_tile(int y,int rows,uint16_t *buffer,const char *strategy,
-                              float fps,int64_t elapsed_us,unsigned frame)
-{
-    set_tile(buffer,0,y,320,rows);
-    color_t black={0,0,0}, light={220,220,220};
-    color_t colors[]={{255,0,0},{0,255,0},{0,0,255},{255,255,255}};
-    int position=(int)((elapsed_us/6250)%320); /* Same 160 px/s motion in every strategy. */
-    for (int py=y;py<y+rows;++py) {
-        int group=(py-CHART_LCD_REFRESH_Y)/64;
-        int local=(py-CHART_LCD_REFRESH_Y)%64;
-        int bar=group ? (160-position+320)%320 : position;
-        for (int x=0;x<320;++x) {
-            color_t c=black;
-            if (py>=CHART_LCD_REFRESH_Y && py<CHART_LCD_REFRESH_Y+CHART_LCD_REFRESH_HEIGHT) {
-                c=colors[local/16];
-                if ((x-bar+320)%320<24) c=black;
-                if (x>=288 && local>=16 && local<48) c=(frame+group)%2 ? light : black;
-            }
-            if (x==0 || x==319 || py==0 || py==319) c=light;
-            pixel(x,py,c,15);
-        }
-    }
-    centered("LCD REFRESH",8,20,white);
-    centered(strategy,36,20,white);
-    char label[40];
-    snprintf(label,sizeof(label),"CMD %d MHz  RGB565",CHART_LCD_SPI_HZ/1000000);
-    centered(label,68,14,light);
-    snprintf(label,sizeof(label),"%.1f FPS",fps);
-    centered(label,240,20,white);
-    centered("320 x 128",288,14,light);
-}
-
-static uint16_t wire_word(uint16_t rgb565)
-{
-    uint8_t bytes[]={(uint8_t)(rgb565>>8),(uint8_t)rgb565};
-    uint16_t word;
-    memcpy(&word,bytes,sizeof(word));
-    return word;
-}
-
-static void refresh_band(int y,int rows,uint16_t *buffer,int64_t elapsed_us,unsigned frame,bool wire)
-{
-    uint16_t colors[]={0xf800,0x07e0,0x001f,0xffff};
-    uint16_t light=pack((color_t){220,220,220});
-    if (wire) {
-        for (unsigned i=0;i<sizeof(colors)/sizeof(*colors);++i) colors[i]=wire_word(colors[i]);
-        light=wire_word(light);
-    }
-    int position=(int)((elapsed_us/6250)%320);
-    for (int py=y;py<y+rows;++py) {
-        uint16_t *row=buffer+(py-y)*320;
-        if (py>y && py%16) { memcpy(row,row-320,320*sizeof(*row)); continue; }
-        int group=(py-CHART_LCD_REFRESH_Y)/64,local=(py-CHART_LCD_REFRESH_Y)%64;
-        int bar=group ? (160-position+320)%320 : position;
-        int end=bar+24<320 ? bar+24 : 320;
-        uint16_t color=colors[local/16];
-        for (int x=0;x<320;++x) row[x]=color;
-        for (int x=bar;x<end;++x) row[x]=0;
-        for (int x=0;x<bar+24-320;++x) row[x]=0;
-        if (local>=16 && local<48)
-            for (int x=288;x<320;++x) row[x]=(frame+group)%2 ? light : 0;
-        row[0]=row[319]=light;
-    }
-}
-
-void chart_render_refresh_band(int y,int rows,uint16_t *buffer,int64_t elapsed_us,unsigned frame)
-{
-    refresh_band(y,rows,buffer,elapsed_us,frame,false);
-}
-
-void chart_render_refresh_band_wire(int y,int rows,uint16_t *buffer,int64_t elapsed_us,unsigned frame)
-{
-    refresh_band(y,rows,buffer,elapsed_us,frame,true);
-}
