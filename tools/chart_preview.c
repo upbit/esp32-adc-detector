@@ -47,8 +47,8 @@ int main(int argc,char **argv)
     /* State and text stress pages for V04/V07; each writes one inspectable frame. */
     const int64_t base=now;
     struct { const char *name,*source; int angle,rssi; } cases[]={
-        {"state-normal","CAM_02",60,-50},
-        {"text-long","CAMERA_LONG_NAME_12345",-170,-104},
+        {"state-normal","CAM_02",60,-61},
+        {"text-long","HomeOffice_Camera_Backyard_5G",-170,-104},
         {"text-short","A",0,-7},
         {"text-missing","",180,0},
     };
@@ -56,6 +56,7 @@ int main(int argc,char **argv)
         snprintf(model.source,sizeof(model.source),"%s",cases[c].source);
         model.heading=model.display_heading=(float)cases[c].angle;
         model.current_rssi=(float)cases[c].rssi;
+        /* Keep the reading fresh so the dBm value renders, not the stale dash. */
         model.last_signal_us=cases[c].rssi ? base : 0;
         char path[512];
         snprintf(path,sizeof(path),"%s/case-%s.ppm",directory,cases[c].name);
@@ -63,7 +64,7 @@ int main(int argc,char **argv)
     }
     snprintf(model.source,sizeof(model.source),"CAM_02");
     model.heading=model.display_heading=60;
-    model.current_rssi=-50; model.last_signal_us=base;
+    model.current_rssi=-61; model.last_signal_us=base;
     struct { const char *name; chart_pose_status_t pose; chart_target_status_t target; float tilt; chart_mode_t mode; } states[]={
         {"state-imu-error",CHART_IMU_ERROR,CHART_TARGET_LOCKED,0,UI_SIM},
         {"state-calibrating",CHART_CALIBRATING,CHART_TARGET_LOCKED,0,UI_SIM},

@@ -135,7 +135,9 @@ static void rendering(void)
     const int gap_x=(int)(CHART_CENTER_X+CHART_SAMPLE_R*0.7071f);
     const int gap_y=(int)(CHART_CENTER_Y-CHART_SAMPLE_R*0.7071f);
     assert(frame[gap_y*320+gap_x]==background); /* Missing +45 degree bin stays empty. */
-    assert(frame[CHART_CENTER_Y*320+CHART_CENTER_X]!=background);
+    /* Origin is a ring with a dark core, so check the ring itself, not the centre. */
+    assert(frame[CHART_CENTER_Y*320+CHART_CENTER_X-4]!=background);
+    assert(frame[(CHART_CENTER_Y-4)*320+CHART_CENTER_X]!=background);
     uint32_t count=model.samples;
     float rssi=model.bins[0].rssi;
     const int fade_band=top_y-top_y%CHART_TILE_ROWS;

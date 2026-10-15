@@ -16,8 +16,8 @@ parser.add_argument("font", type=Path)
 parser.add_argument("output", type=Path)
 args = parser.parse_args()
 chinese = "天线转角慢速动设备模拟静置校准保持水平等待信号未发现错误"
-# 18/24 carry Latin+Chinese; 12/10 are auxiliary; 24 is digits-only for the RSSI readout.
-sizes = (10, 12, 18, 24)
+# 18/24 carry Latin+Chinese; 12/14 are auxiliary; 24 is digits-only for the RSSI readout.
+sizes = (12, 14, 18, 24)
 digits_only = {24}
 glyphs = []
 data = bytearray()

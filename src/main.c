@@ -253,6 +253,8 @@ static void render_task(void *arg)
     chart_render_init();
     esp_err_t err=chart_lcd_init();
     if (err!=ESP_OK) { ESP_LOGE("lcd","init: %s",esp_err_to_name(err)); free(pixels); free(snapshot); vTaskDelete(NULL); return; }
+#if CHART_LCD_BOOT_DIAGNOSTIC
+    /* Colour/boundary check stays available but off by default; see plan P0-D. */
     ESP_LOGI("lcd","sending full-screen RGB/white boot test pattern");
     for (int y=0;y<320;y+=CHART_TILE_ROWS) {
         int rows=320-y<CHART_TILE_ROWS ? 320-y : CHART_TILE_ROWS;
@@ -262,22 +264,19 @@ static void render_task(void *arg)
     ESP_LOGI("lcd","test pattern sent over SPI (no panel readback); holding for %d ms",CHART_LCD_TEST_MS);
     vTaskDelay(pdMS_TO_TICKS(CHART_LCD_TEST_MS));
     ESP_LOGI("lcd","boot test finished; starting star chart");
+#endif
     int64_t report_started=esp_timer_get_time(),draw_us=0,spi_us=0,frame_max_us=0;
     unsigned report_frames=0,display_frame=0;
     float display_fps=0;
-    ESP_LOGI("lcd","refresh test T%02d: %d MHz; animated chart and FPS footer",CHART_LCD_TEST_ID,CHART_LCD_SPI_HZ/1000000);
+    ESP_LOGI("lcd","starting star chart at %d MHz",CHART_LCD_SPI_HZ/1000000);
     for (;;) {
         int64_t started=esp_timer_get_time();
         int64_t frame_draw_us=0,frame_spi_us=0;
-        char perf_label[48];
-        snprintf(perf_label,sizeof(perf_label),"T%02d %dMHz %.1fFPS",
-            CHART_LCD_TEST_ID,CHART_LCD_SPI_HZ/1000000,display_fps);
         lock(); memcpy(snapshot,&model,sizeof(model)); unlock();
         for (int y=0;y<320;y+=CHART_TILE_ROWS) {
             int rows=320-y<CHART_TILE_ROWS ? 320-y : CHART_TILE_ROWS;
             int64_t tile_started=esp_timer_get_time();
             chart_render_tile(snapshot,started,y,rows,pixels);
-            if (CHART_LCD_TEST_ID) chart_render_test_overlay(y,rows,pixels,perf_label,display_frame);
             int64_t drawn=esp_timer_get_time();
             err=chart_lcd_tile(y,rows,pixels);
             frame_draw_us+=drawn-tile_started;

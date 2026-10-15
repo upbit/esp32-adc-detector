@@ -17,6 +17,9 @@
 #define CHART_LCD_INVERT 1
 #define CHART_LCD_TEST_MS 5000 /* Hold the bright boot pattern for inspection. */
 #define CHART_LCD_TEST_ID 4 /* 0 restores the normal status footer. */
+#ifndef CHART_LCD_BOOT_DIAGNOSTIC
+#define CHART_LCD_BOOT_DIAGNOSTIC 0 /* 1 shows the colour/boundary check before the chart. */
+#endif
 #ifndef CHART_LCD_REFRESH_TEST
 #define CHART_LCD_REFRESH_TEST 1 /* 0 restores the existing star-chart tasks. */
 #endif
@@ -34,12 +37,15 @@
 #define CHART_CENTER_Y 156
 #define CHART_OUTER_R 114 /* Outer ring; ticks and glow extend a few pixels further. */
 #define CHART_SAMPLE_R 103 /* Fixed sample radius; RSSI never moves points radially. */
-/* Text sizes confirmed in P0; previews may still adjust placement, not these values. */
+/* Text sizes confirmed on hardware 2026-10-15: ticks up one step, labels up two. */
 #define CHART_FONT_NAME 18
 #define CHART_FONT_RSSI 24
 #define CHART_FONT_ANGLE 18
-#define CHART_FONT_FREQ 12
-#define CHART_FONT_SMALL 10
+#define CHART_FONT_FREQ 14 /* 2437 MHz under the name; one step up from the ticks. */
+#define CHART_FONT_TICK 12 /* -90/+90/180 dial ticks. */
+#define CHART_FONT_LABEL 14 /* dBm, 模拟, 天线: deliberately larger than the ticks. */
+#define CHART_FONT_STATUS 14 /* Bottom status line. */
+#define CHART_FONT_TURN 14 /* The 转角 prefix; its number uses CHART_FONT_ANGLE. */
 /* Noto Sans SC hhea ascender is 1.16 em; used to align different sizes on one baseline. */
 #define CHART_ASCENT(size) (((size)*116+50)/100)
 

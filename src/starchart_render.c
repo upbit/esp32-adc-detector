@@ -10,8 +10,10 @@ static const color_t bg = {4,18,30}, grid = {27,49,66}, white = {231,242,248},
     muted = {154,181,201}, cyan = {37,223,237}, dark = {20,97,115},
     amber = {255,196,90}, history = {100,114,131};
 static float sine[720], cosine[720];
-/* Q6 distances for discs up to 8 px; the largest current radius is 5.5 px. */
-static uint16_t distance_lut[4096];
+/* Q6 distances for discs up to CHART_DISC_MAX_R px; widest halo is (4+7)+6 wide. */
+#define CHART_DISC_MAX_R 12
+#define CHART_DISTANCE_LUT ((CHART_DISC_MAX_R+1)*(CHART_DISC_MAX_R+1)*64)
+static uint16_t distance_lut[CHART_DISTANCE_LUT];
 static uint16_t *tile;
 static int tile_y, tile_rows;
 
@@ -41,6 +43,8 @@ static void pixel(int x, int y, color_t c, unsigned alpha)
 static void disc(float x, float y, float radius, color_t c)
 {
     if (y+radius+1 < tile_y || y-radius-1 >= tile_y+tile_rows) return;
+    /* The LUT bounds the radius; clamp rather than read past it. */
+    if (radius>CHART_DISC_MAX_R) radius=CHART_DISC_MAX_R;
     int cx=(int)lroundf(x*64),cy=(int)lroundf(y*64),edge=(int)lroundf((radius+0.5f)*64);
     int left=(int)floorf(x-radius),right=(int)ceilf(x+radius);
     int top=(int)floorf(y-radius),bottom=(int)ceilf(y+radius);
@@ -143,15 +147,17 @@ static int text_width(const char *s, int size)
     return w;
 }
 
-static void text(const char *s, int x, int y, int size, color_t c, int limit)
+/* `ellipsis` marks the one caller (the source name) that may be shortened with "...". */
+static void text_limited(const char *s, int x, int y, int size, color_t c, int limit, bool ellipsis)
 {
     uint32_t code;
     while ((code=next_code(&s))) {
         const chart_glyph_t *g=glyph(code,size);
         if (!g) continue;
-        if (x+g->width > limit || (limit==185 && *s && code!='.' &&
+        if (x+g->width > limit || (ellipsis && *s && code!='.' &&
             x+g->width+text_width("...",size)>limit)) {
-            if (code!='.' && limit-x>=text_width("...",size)) text("...",x,y,size,c,limit);
+            if (ellipsis && code!='.' && limit-x>=text_width("...",size))
+                text_limited("...",x,y,size,c,limit,false);
             return;
         }
         /* Glyph rows are trimmed to inked extent; `top` restores the shared baseline. */
@@ -171,14 +177,55 @@ static void text(const char *s, int x, int y, int size, color_t c, int limit)
     }
 }
 
+static void text(const char *s, int x, int y, int size, color_t c, int limit)
+{
+    text_limited(s,x,y,size,c,limit,false);
+}
+
+/* Ink bottom of a size's reference glyph, for optical baseline alignment. */
+static int ink_bottom(int size)
+{
+    const chart_glyph_t *g=glyph('0',size);
+    if (!g) g=glyph('B',size);
+    if (!g) return size;
+    int bottom=-1;
+    for (int py=0; py<g->height; ++py)
+        for (int px=0; px<g->width; ++px) {
+            unsigned pos=py*g->width+px;
+            unsigned v=chart_font_data[g->offset+pos/2];
+            if ((pos%2 ? v&15 : v>>4) && py>bottom) bottom=py;
+        }
+    return g->top+(bottom<0 ? g->height-1 : bottom);
+}
+
 static void centered(const char *s,int y,int size,color_t c)
 {
     text(s,CHART_CENTER_X-text_width(s,size)/2,y,size,c,320);
 }
 
+/* Ink centre of a size's digit box, so mixed-size runs can align optically. */
+static int ink_centre(int size)
+{
+    const chart_glyph_t *g=glyph('0',size);
+    if (!g) g=glyph('A',size);
+    if (!g) return size/2;
+    int top=g->height,bottom=-1;
+    for (int py=0; py<g->height; ++py)
+        for (int px=0; px<g->width; ++px) {
+            unsigned pos=py*g->width+px;
+            unsigned v=chart_font_data[g->offset+pos/2];
+            if (pos%2 ? v&15 : v>>4) {
+                if (py<top) top=py;
+                if (py>bottom) bottom=py;
+            }
+        }
+    if (bottom<0) return g->top+g->height/2;
+    return g->top+(top+bottom)/2;
+}
+
 void chart_render_init(void)
 {
-    for (unsigned j=0;j<4096;++j) distance_lut[j]=(uint16_t)sqrtf(j*64.0f);
+    for (unsigned j=0;j<CHART_DISTANCE_LUT;++j) distance_lut[j]=(uint16_t)sqrtf(j*64.0f);
     for (int j=0; j<720; ++j) {
         sine[j]=sinf(j*3.14159265358979323846f/360);
         cosine[j]=cosf(j*3.14159265358979323846f/360);
@@ -199,10 +246,11 @@ static color_t bin_color(const chart_bin_t *b,int64_t now)
 static float bin_width(const chart_bin_t *b,int64_t now)
 {
     float strength=fmaxf(0,fminf(1,(b->rssi-CHART_RSSI_MIN)/(CHART_RSSI_MAX-CHART_RSSI_MIN)));
-    float width=2+5*strength;
+    /* Strength reads as ribbon thickness, matching the design's banded scale. */
+    float width=4+7*strength;
     if (now-b->updated_us>CHART_DARK_US) {
         float fade=fminf(1,(float)(now-b->updated_us-CHART_DARK_US)/(CHART_HISTORY_US-CHART_DARK_US));
-        width += (1-width)*fade;
+        width += (1.5f-width)*fade;
     }
     return width;
 }
@@ -225,11 +273,31 @@ void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_
         polar(a,a%30 ? CHART_OUTER_R+1 : CHART_OUTER_R+4,&x2,&y2);
         line(x1,y1,x2,y2,0.9f,mix(grid,muted,0.35f));
     }
-    /* Fixed antenna cone and ray, never an independent radar sweep. */
-    for (int a=-10;a<=10;a+=2) {
-        float x1,y1,x2,y2;
-        polar(a,14,&x1,&y1); polar(a,CHART_SAMPLE_R-7,&x2,&y2);
-        line(x1,y1,x2,y2,2,mix(bg,dark,0.22f*(1-fabsf((float)a)/12)));
+    /* Fixed antenna cone: a solid wedge fading outward, not a radar sweep. */
+    {
+        const float half_angle=11.0f, reach=CHART_SAMPLE_R-6.0f;
+        int top=CHART_CENTER_Y-(int)reach-1;
+        if (top<tile_y) top=tile_y;
+        int bottom=CHART_CENTER_Y;
+        if (bottom>=tile_y+tile_rows) bottom=tile_y+tile_rows-1;
+        const float slope=tanf(half_angle*3.14159265f/180.0f);
+        for (int py=top;py<=bottom;++py) {
+            float dy=(float)(CHART_CENTER_Y-py);
+            if (dy<0 || dy>reach) continue;
+            float spread=dy*slope;
+            /* Fade with distance so the wedge reads as emission, not a filled triangle. */
+            float strength=1.0f-dy/reach;
+            strength*=strength;
+            int from=(int)floorf(CHART_CENTER_X-spread)-1,to=(int)ceilf(CHART_CENTER_X+spread)+1;
+            for (int px=from;px<=to;++px) {
+                float dx=fabsf((float)px-CHART_CENTER_X);
+                /* Soften both the outer edge and the centre so no hard step shows. */
+                float edge=fminf(1.0f,fmaxf(0.0f,spread+0.5f-dx));
+                float alpha=15.0f*0.42f*strength*edge;
+                unsigned a=(unsigned)(alpha+0.5f);
+                if (a) pixel(px,py,cyan,a>15 ? 15 : a);
+            }
+        }
     }
     for (int i=0;i<CHART_BINS;++i) {
         const chart_bin_t *b=&m->bins[i],*next=&m->bins[(i+1)%CHART_BINS];
@@ -237,19 +305,21 @@ void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_
         float angle=chart_wrap180(b->heading-m->display_heading);
         float span=next->count ? chart_wrap180(next->heading-b->heading) : 0;
         if (span<0 || span>20) span=0;
-        if (!arc_in_tile(angle,angle+span,CHART_SAMPLE_R,7)) continue;
+        if (!arc_in_tile(angle,angle+span,CHART_SAMPLE_R,9)) continue;
         color_t c=bin_color(b,now);
         float width=bin_width(b,now);
         if (span>0) {
             color_t next_color=bin_color(next,now);
             float next_width=bin_width(next,now);
             for (float t=0;t<span;t+=1) {
-                if (!arc_in_tile(angle+t,angle+fminf(t+1,span),CHART_SAMPLE_R,7)) continue;
+                if (!arc_in_tile(angle+t,angle+fminf(t+1,span),CHART_SAMPLE_R,9)) continue;
                 color_t part=mix(c,next_color,t/span);
                 float w=width+(next_width-width)*t/span;
-                arc(angle+t,angle+fminf(t+1,span),CHART_SAMPLE_R,w+4,mix(bg,part,0.08f));
-                arc(angle+t,angle+fminf(t+1,span),CHART_SAMPLE_R,w+2,mix(bg,part,0.16f));
+                /* Outer halo, inner halo, then a bright core: a ribbon, not a hairline. */
+                arc(angle+t,angle+fminf(t+1,span),CHART_SAMPLE_R,w+6,mix(bg,part,0.14f));
+                arc(angle+t,angle+fminf(t+1,span),CHART_SAMPLE_R,w+3,mix(bg,part,0.30f));
                 arc(angle+t,angle+fminf(t+1,span),CHART_SAMPLE_R,w,part);
+                arc(angle+t,angle+fminf(t+1,span),CHART_SAMPLE_R,w*0.42f,mix(part,white,0.28f));
             }
         }
         float px,py; polar(angle,CHART_SAMPLE_R,&px,&py);
@@ -259,18 +329,22 @@ void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_
         const chart_bin_t *b=&m->bins[m->peak_bin];
         float a=chart_wrap180(b->heading-m->display_heading);
         color_t c=now-b->updated_us>CHART_DARK_US ? history : amber;
-        arc(a-6,a+6,CHART_SAMPLE_R,8,mix(bg,c,0.15f));
-        arc(a-6,a+6,CHART_SAMPLE_R,4,c);
-        float px,py; polar(a,CHART_SAMPLE_R,&px,&py); disc(px,py,2,mix(c,white,0.4f));
+        arc(a-6,a+6,CHART_SAMPLE_R,12,mix(bg,c,0.18f));
+        arc(a-6,a+6,CHART_SAMPLE_R,7,c);
+        float px,py; polar(a,CHART_SAMPLE_R,&px,&py); disc(px,py,2.6f,mix(c,white,0.5f));
     }
     /* Antenna marker sits just outside the sample ring, straddling the outer ring. */
     line(CHART_CENTER_X,CHART_CENTER_Y,CHART_CENTER_X,CHART_CENTER_Y-CHART_SAMPLE_R-4,1,cyan);
-    disc(CHART_CENTER_X,CHART_CENTER_Y,3,cyan);
+    /* Origin reads as a ring with a dark core, matching the design's hollow hub. */
+    disc(CHART_CENTER_X,CHART_CENTER_Y,4.5f,cyan);
+    disc(CHART_CENTER_X,CHART_CENTER_Y,2.2f,bg);
     for (int py=CHART_CENTER_Y-CHART_OUTER_R-10;py<=CHART_CENTER_Y-CHART_OUTER_R+1;++py) {
         int half=(py-(CHART_CENTER_Y-CHART_OUTER_R-10))/2;
         for (int px=CHART_CENTER_X-half;px<=CHART_CENTER_X+half;++px) pixel(px,py,cyan,15);
     }
-    text(m->source[0] ? m->source : "--",12,8,CHART_FONT_NAME,white,185);
+    /* Name must stop clear of the centred 天线 marker, whatever that label measures. */
+    int antenna_left=CHART_CENTER_X-text_width("天线",CHART_FONT_LABEL)/2;
+    text_limited(m->source[0] ? m->source : "--",12,8,CHART_FONT_NAME,white,antenna_left-8,true);
     char label[64];
     if (m->frequency_mhz) snprintf(label,sizeof(label),"%d MHz",m->frequency_mhz);
     else snprintf(label,sizeof(label),"-- MHz");
@@ -279,34 +353,50 @@ void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_
     if (m->last_signal_us) snprintf(label,sizeof(label),"%d",(int)lroundf(m->current_rssi));
     else snprintf(label,sizeof(label),"--");
     text(label,278-text_width(label,CHART_FONT_RSSI),4,CHART_FONT_RSSI,stale ? history : cyan,278);
-    text("dBm",281,22,CHART_FONT_SMALL,muted,318);
-    if (m->mode!=LIVE_WIFI) text("模拟",12,52,CHART_FONT_SMALL,amber,70);
-    centered("天线",6,CHART_FONT_SMALL,cyan);
-    text("-90°",12,CHART_CENTER_Y-10,CHART_FONT_SMALL,muted,44);
-    text("+90°",276,CHART_CENTER_Y-10,CHART_FONT_SMALL,muted,319);
+    /* dBm sits on the reading's baseline, not its box. */
+    text("dBm",281,4+ink_bottom(CHART_FONT_RSSI)-ink_bottom(CHART_FONT_LABEL),
+         CHART_FONT_LABEL,muted,319);
+    if (m->mode!=LIVE_WIFI) text("模拟",12,54,CHART_FONT_LABEL,amber,80);
+    centered("天线",4,CHART_FONT_LABEL,cyan);
+    text("-90°",10,CHART_CENTER_Y-11,CHART_FONT_TICK,muted,48);
+    text("+90°",272,CHART_CENTER_Y-11,CHART_FONT_TICK,muted,319);
     int angle=(int)lroundf(chart_wrap180(m->heading));
     if (angle==180) angle=-180;
     snprintf(label,sizeof(label),"%+04d°",angle);
-    /* Turn angle stays inside the dial; baselines align via the 1.16em ascent. */
-    int w=text_width("转角 ",CHART_FONT_SMALL)+text_width(label,CHART_FONT_ANGLE);
+    /* Turn angle stays inside the dial; the prefix centres on the number's ink. */
+    int w=text_width("转角 ",CHART_FONT_TURN)+text_width(label,CHART_FONT_ANGLE);
     int left=CHART_CENTER_X-w/2;
-    text("转角 ",left,206+CHART_ASCENT(CHART_FONT_ANGLE)-CHART_ASCENT(CHART_FONT_SMALL),
-         CHART_FONT_SMALL,muted,320);
-    text(label,left+text_width("转角 ",CHART_FONT_SMALL),206,CHART_FONT_ANGLE,cyan,320);
+    text("转角 ",left,206+ink_centre(CHART_FONT_ANGLE)-ink_centre(CHART_FONT_TURN),
+         CHART_FONT_TURN,muted,320);
+    text(label,left+text_width("转角 ",CHART_FONT_TURN),206,CHART_FONT_ANGLE,cyan,320);
+    /* Trend sparkline: clipped left so it never touches the dial's tick ring. */
+    const float trend_right=306.0f, trend_base=57.0f, trend_height=12.0f;
+    /* At the sparkline's lowest row the ring reaches furthest right; clear it there. */
+    float ring_dy=(float)(CHART_CENTER_Y-trend_base);
+    float ring_edge=(float)CHART_OUTER_R+4;
+    float ring_x=ring_dy<ring_edge
+        ? CHART_CENTER_X+sqrtf(ring_edge*ring_edge-ring_dy*ring_dy) : (float)CHART_CENTER_X;
+    const float trend_left=ring_x+5;
     unsigned first=(m->trend_next+CHART_TREND_LENGTH-m->trend_used)%CHART_TREND_LENGTH;
     for (unsigned i=1;i<m->trend_used;++i) {
         chart_signal_event_t a=m->trend[(first+i-1)%CHART_TREND_LENGTH];
         chart_signal_event_t b=m->trend[(first+i)%CHART_TREND_LENGTH];
-        if (b.time_us-a.time_us>350000 || now-a.time_us>4400000) continue;
-        float x1=306-(now-a.time_us)/50000.0f, x2=306-(now-b.time_us)/50000.0f;
+        if (b.time_us-a.time_us>350000) continue;
+        float x1=trend_right-(now-a.time_us)/50000.0f, x2=trend_right-(now-b.time_us)/50000.0f;
+        if (x2<trend_left) continue; /* Older than the window; already scrolled out. */
         float v1=fmaxf(0,fminf(1,(a.rssi-CHART_RSSI_MIN)/(CHART_RSSI_MAX-CHART_RSSI_MIN)));
         float v2=fmaxf(0,fminf(1,(b.rssi-CHART_RSSI_MIN)/(CHART_RSSI_MAX-CHART_RSSI_MIN)));
-        line(x1,57-v1*12,x2,57-v2*12,1,stale ? history : dark);
+        float y1=trend_base-v1*trend_height,y2=trend_base-v2*trend_height;
+        if (x1<trend_left) { /* Trim the entering segment instead of dropping it. */
+            y1+=(y2-y1)*(trend_left-x1)/(x2-x1);
+            x1=trend_left;
+        }
+        line(x1,y1,x2,y2,1,stale ? history : dark);
     }
-    /* Bottom: `180°` outside the dial, then the coverage bar, then one status line. */
-    centered("180°",CHART_CENTER_Y+CHART_OUTER_R+6,CHART_FONT_SMALL,muted);
-    line(67,294,253,294,3,grid);
-    if (m->coverage) line(67,294,67+186.0f*m->coverage/CHART_BINS,294,3,cyan);
+    /* Bottom: `180°` clears the ticks, the coverage bar sits between the two lines. */
+    centered("180°",276,CHART_FONT_TICK,muted);
+    line(67,295,253,295,3,grid);
+    if (m->coverage) line(67,295,67+186.0f*m->coverage/CHART_BINS,295,3,cyan);
     const char *status="慢速转动设备";
     if (m->pose_status==CHART_IMU_ERROR) status="IMU 错误";
     else if (m->pose_status==CHART_CALIBRATING) status="静置校准";
@@ -314,7 +404,7 @@ void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_
     else if (m->target_status==CHART_WIFI_ERROR) status="Wi-Fi 错误";
     else if (m->target_status==CHART_TARGET_MISSING) status="未发现信号";
     else if (stale || m->target_status==CHART_TARGET_SEARCH) status="等待信号";
-    centered(status,303,CHART_FONT_SMALL,muted);
+    centered(status,297,CHART_FONT_STATUS,muted);
 }
 
 void chart_render_test_tile(int y,int rows,uint16_t *buffer)
