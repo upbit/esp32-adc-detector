@@ -75,7 +75,7 @@ void chart_render_rect(const chart_model_t *snapshot, int64_t now,
 /* Full-width reference entry retained through P5. */
 void chart_render_tile(const chart_model_t *snapshot, int64_t now, int y, int rows,
                        uint16_t *rgb565);
-/* Approved P4 interface; implementation and callers arrive with dirty refresh. */
+/* Overwrites the 50-byte mask; NULL previous means a full-screen invalidation. */
 void chart_mark_dirty(const chart_model_t *previous, int64_t previous_time,
                       const chart_model_t *current, int64_t current_time,
                       chart_dirty_mask_t *mask);

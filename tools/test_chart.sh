@@ -15,5 +15,5 @@ cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
   -I include src/starchart.c src/starchart_render.c test/test_lcd_pipeline.c -lm -o "$pipeline_binary"
 "$pipeline_binary"
 cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
-  -I include test/test_lcd_rect.c -o "$rect_binary"
+  -I include src/starchart.c src/starchart_render.c test/test_lcd_rect.c -lm -o "$rect_binary"
 "$rect_binary"

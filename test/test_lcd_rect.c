@@ -6,6 +6,7 @@
 #define CHART_LCD_X_OFFSET 7
 #define CHART_LCD_Y_OFFSET 11
 #include "../src/chart_hardware.c"
+#include "../src/main.c"
 #include <assert.h>
 #include <limits.h>
 
@@ -14,6 +15,7 @@ static uint8_t payload[320*320*2];
 static struct {
     spi_transaction_t *original,copy;
     uint8_t bytes[CHART_LCD_BUFFER_BYTES];
+    int64_t end_us;
 } queue[2];
 static unsigned pending,polls,submits,completions,transfers,releases;
 static unsigned fail_poll,fail_submit,fail_completion;
@@ -23,12 +25,21 @@ static int dc,actual_hz;
 static int64_t clock_us;
 static uint8_t commands[3],addresses[2][4];
 static unsigned command_count;
+static bool virtual_mode;
+static uint16_t screen[320*320],full_frame[320*320];
+static unsigned idle_ticks,total_windows;
+static unsigned timers_in_transit;
+static int window_x,window_y,window_width,window_rows;
 
-int64_t esp_timer_get_time(void) { return ++clock_us; }
+int64_t esp_timer_get_time(void)
+{
+    if (virtual_mode && pending && clock_us<queue[pending-1].end_us) ++timers_in_transit;
+    return ++clock_us;
+}
 int gpio_get_level(int pin) { (void)pin; return 1; }
 int gpio_set_level(int pin,int value) { assert(pin==CHART_LCD_DC && !pending); dc=value; return 0; }
 esp_err_t gpio_config(const gpio_config_t *config) { (void)config; return ESP_OK; }
-void vTaskDelay(int ticks) { clock_us+=ticks*1000; }
+void vTaskDelay(int ticks) { clock_us+=ticks*1000; idle_ticks+=(unsigned)ticks; }
 esp_err_t spi_bus_initialize(int host,const spi_bus_config_t *config,int dma)
 {
     assert(host==SPI2_HOST && dma==SPI_DMA_CH_AUTO && config->max_transfer_sz==10240);
@@ -66,8 +77,18 @@ esp_err_t spi_device_polling_transmit(spi_device_handle_t handle,spi_transaction
     actual_hz=t->override_freq_hz;
     if (lcd_window.open) {
         assert(acquired && !cs);
+        if (virtual_mode && !dc && t->tx_data[0]==0x2a) {
+            command_count=0; payload_size=0; ++total_windows;
+        }
         if (!dc) { assert(command_count<3); commands[command_count++]=t->tx_data[0]; }
         else { assert(command_count==1 || command_count==2); memcpy(addresses[command_count-1],t->tx_data,4); }
+        if (virtual_mode && !dc && t->tx_data[0]==0x2c) {
+            window_x=((addresses[0][0]<<8)|addresses[0][1])-CHART_LCD_X_OFFSET;
+            window_y=((addresses[1][0]<<8)|addresses[1][1])-CHART_LCD_Y_OFFSET;
+            window_width=((addresses[0][2]<<8)|addresses[0][3])-CHART_LCD_X_OFFSET-window_x+1;
+            window_rows=((addresses[1][2]<<8)|addresses[1][3])-CHART_LCD_Y_OFFSET-window_y+1;
+            window_bytes=(size_t)window_width*window_rows*2;
+        }
     }
     return ESP_OK;
 }
@@ -89,6 +110,8 @@ esp_err_t spi_device_queue_trans(spi_device_handle_t handle,spi_transaction_t *t
     for (unsigned i=0;i<pending;++i) assert(queue[i].original!=t);
     queue[pending].original=t; queue[pending].copy=*t;
     memcpy(queue[pending].bytes,t->tx_buffer,t->length/8);
+    int64_t start=pending && queue[pending-1].end_us>clock_us ? queue[pending-1].end_us : clock_us;
+    queue[pending].end_us=start+(int64_t)(t->length/8)/10+1;
     ++pending; return ESP_OK;
 }
 esp_err_t spi_device_get_trans_result(spi_device_handle_t handle,spi_transaction_t **t,int ticks)
@@ -100,7 +123,17 @@ esp_err_t spi_device_get_trans_result(spi_device_handle_t handle,spi_transaction
     if (missing_result) return ESP_ERR_INVALID_STATE;
     if (wrong_result) { static spi_transaction_t foreign; *t=&foreign; return ESP_OK; }
     size_t n=queue[0].copy.length/8;
+    if (virtual_mode && clock_us<queue[0].end_us) clock_us=queue[0].end_us;
     assert(dc==1 && payload_size+n<=window_bytes);
+    if (virtual_mode) {
+        const uint8_t *bytes=queue[0].copy.tx_buffer;
+        for (size_t i=0;i<n;i+=2) {
+            size_t index=(payload_size+i)/2;
+            int x=window_x+(int)(index%window_width),y=window_y+(int)(index/window_width);
+            assert(x>=0 && x<320 && y>=0 && y<320);
+            screen[y*320+x]=(uint16_t)((bytes[i]<<8)|bytes[i+1]);
+        }
+    }
     memcpy(payload+payload_size,queue[0].copy.tx_buffer,n); payload_size+=n;
     cs=(queue[0].copy.flags&SPI_TRANS_CS_KEEP_ACTIVE)!=0;
     assert(cs==(payload_size<window_bytes));
@@ -250,6 +283,185 @@ static void failures(void)
     assert(chart_lcd_window_end(NULL)==ESP_ERR_INVALID_STATE && !pending && !acquired && lcd_window.failed);
 }
 
+static void set_cell(chart_dirty_mask_t *mask,int row,int col)
+{
+    unsigned bit=(unsigned)(row*CHART_DIRTY_COLS+col);
+    mask->bits[bit/8]|=(uint8_t)(1U<<(bit%8));
+}
+
+static void plans(void)
+{
+    chart_dirty_mask_t mask={0};
+    set_cell(&mask,2,1); set_cell(&mask,2,3); set_cell(&mask,2,6);
+    display_rect_iterator_t plan=display_rect_plan(&mask);
+    display_rect_t rect;
+    assert(!plan.bounded && display_next_rect(&plan,&rect));
+    assert(rect.x==16 && rect.y==32 && rect.width==48 && rect.rows==16);
+    assert(display_next_rect(&plan,&rect) && rect.x==96 && rect.width==16);
+    assert(!display_next_rect(&plan,&rect));
+    memset(&mask,0,sizeof(mask));
+    set_cell(&mask,0,0); set_cell(&mask,1,0);
+    plan=display_rect_plan(&mask);
+    assert(plan.bounded && display_next_rect(&plan,&rect) && rect.width==16 && rect.rows==32);
+    memset(mask.bits,255,sizeof(mask.bits));
+    plan=display_rect_plan(&mask);
+    assert(plan.bounded && display_next_rect(&plan,&rect) && rect.width==320 && rect.rows==320);
+    memset(&mask,0,sizeof(mask));
+    plan=display_rect_plan(&mask); assert(!display_next_rect(&plan,&rect));
+}
+
+static void check_update(displayed_state_t *displayed,chart_model_t *model,int64_t now)
+{
+    chart_model_t saved=*model;
+    chart_render_rect(model,now,0,0,320,320,full_frame);
+    display_work_t work;
+    assert(display_update(displayed,model,now,pixels,&work)==ESP_OK);
+    for (int i=0;i<320*320;++i) {
+        if (screen[i]!=full_frame[i]) {
+            fprintf(stderr,"dirty mismatch x=%d y=%d now=%lld heading=%f\n",i%320,i/320,(long long)now,model->display_heading);
+            assert(screen[i]==full_frame[i]);
+        }
+    }
+    assert(!memcmp(model,&saved,sizeof(saved)) && !pending && !acquired && !cs);
+    if (work.windows) {
+        assert(displayed->valid && displayed->time==now && !memcmp(&displayed->snapshot,model,sizeof(*model)));
+        assert(work.bytes && work.draw_us>0 && work.work_us>0);
+    }
+}
+
+static void dirty_refresh(void)
+{
+    reset(); virtual_mode=true; chart_render_init();
+    displayed_state_t displayed={0};
+    chart_model_t model;
+    int64_t now=1000000;
+    chart_init(&model,UI_SIM,now);
+    check_update(&displayed,&model,now);
+    assert(total_windows==1 && transfers==20);
+    assert(timers_in_transit>0);
+    unsigned before=submits,ticks=idle_ticks;
+    check_update(&displayed,&model,now+1000);
+    assert(submits==before && idle_ticks==ticks+1);
+    for (int i=0;i<CHART_BINS;++i) {
+        model.bins[i]=(chart_bin_t){.count=3,.heading=(float)i*10,.rssi=-40-i,.updated_us=now};
+    }
+    model.coverage=36; model.peak_bin=6; model.last_signal_us=now; model.current_rssi=-61;
+    model.target_status=CHART_TARGET_LOCKED;
+    for (int i=0;i<CHART_TREND_LENGTH;++i)
+        model.trend[i]=(chart_signal_event_t){now-2000000+i*45000,-90+i,true};
+    model.trend_used=CHART_TREND_LENGTH; model.trend_next=0;
+    check_update(&displayed,&model,now);
+    const float angles[]={0,30.37f,60,-179.9f,179.9f,-180,180,720.4f,-541.2f};
+    for (unsigned i=0;i<sizeof(angles)/sizeof(*angles);++i) {
+        model.heading=model.display_heading=angles[i];
+        now+=8333; check_update(&displayed,&model,now);
+    }
+    model.display_heading=0; model.heading=0;
+    for (int i=0;i<200;++i) {
+        now+=8333; model.heading+=0.125f; model.display_heading+=0.125f;
+        if (i%7==0) {
+            int bin=i%CHART_BINS;
+            model.bins[bin].count=(i%14) ? 0 : 3;
+            model.bins[bin].rssi=-90+(i%51);
+            model.bins[bin].heading=bin*10+(i%3)*0.37f;
+            model.bins[bin].updated_us=now;
+            model.peak_bin=(i%14) ? -1 : bin;
+            model.current_rssi=(i%21) ? -7 : -104;
+        }
+        check_update(&displayed,&model,now);
+    }
+    /* No packets: scrolling, freshness/color/width transitions and timeout. */
+    const int64_t ages[]={CHART_FRESH_US,CHART_FRESH_US+1,3000000,CHART_DARK_US,
+        CHART_DARK_US+1,12000000,CHART_HISTORY_US,CHART_HISTORY_US+1,30000000};
+    int64_t base=now;
+    for (unsigned i=0;i<sizeof(ages)/sizeof(*ages);++i) check_update(&displayed,&model,base+ages[i]);
+    now=base+30000000;
+    before=submits; ticks=idle_ticks;
+    model.samples+=200; model.sync_rejected+=2; model.pose_next=5;
+    model.bins[2].count+=100; model.bins[2].values[0]=123; model.recent[0]=22;
+    check_update(&displayed,&model,now+10000);
+    assert(submits==before && idle_ticks==ticks+1);
+    const char *names[]={"HomeOffice_Camera_Backyard_5G","CAM_02","","bad\xffname"};
+    for (unsigned i=0;i<sizeof(names)/sizeof(*names);++i) {
+        snprintf(model.source,sizeof(model.source),"%s",names[i]); model.frequency_mhz=i ? 0 : 123456;
+        check_update(&displayed,&model,++now);
+    }
+    model.pose_status=CHART_CALIBRATING; check_update(&displayed,&model,++now);
+    model.pose_status=CHART_IMU_ERROR; check_update(&displayed,&model,++now);
+    model.pose_status=CHART_READY; model.tilt_deg=25; check_update(&displayed,&model,++now);
+    model.tilt_deg=0; model.target_status=CHART_WIFI_ERROR; check_update(&displayed,&model,++now);
+    model.target_status=CHART_TARGET_MISSING; check_update(&displayed,&model,++now);
+    model.target_status=CHART_TARGET_SEARCH; check_update(&displayed,&model,++now);
+    model.target_status=CHART_TARGET_LOCKED; model.last_signal_us=now; check_update(&displayed,&model,++now);
+    model.coverage=0; model.last_signal_us=0; model.peak_bin=-1; model.trend_used=0;
+    memset(model.bins,0,sizeof(model.bins)); check_update(&displayed,&model,++now);
+    chart_zero(&model,++now); check_update(&displayed,&model,now);
+    chart_init(&model,LIVE_WIFI,++now); check_update(&displayed,&model,now);
+    chart_init(&model,IMU_SIM_RSSI,++now); check_update(&displayed,&model,now);
+    /* Separate small windows must prepare the next rect while the previous drains. */
+    model.heading=60; model.current_rssi=-70; model.last_signal_us=now;
+    display_work_t work;
+    assert(display_update(&displayed,&model,++now,pixels,&work)==ESP_OK);
+    assert(work.windows>1 && work.overlap_draw_us>0);
+    chart_render_rect(&model,now,0,0,320,320,full_frame);
+    assert(!memcmp(screen,full_frame,sizeof(screen)));
+    /* Deterministic changes independently perturb predecessor arcs and circular trend history. */
+    uint32_t seed=0x14c5;
+    for (unsigned step=0;step<300;++step) {
+        seed=seed*1664525U+1013904223U;
+        int bin=(int)(seed%CHART_BINS);
+        now+=1000+(seed%60000);
+        model.heading=(float)(seed%144000)/100-720;
+        model.display_heading=model.heading+0.37f;
+        model.bins[bin]=(chart_bin_t){.count=(seed&256) ? 3 : 0,
+            .heading=bin*10+(float)(seed%900)/100,.rssi=-90+(float)(seed%51),
+            .updated_us=now-(seed%25000000)};
+        model.peak_bin=(seed&512) ? bin : -1;
+        model.trend[model.trend_next]=(chart_signal_event_t){now,-90+(int)(seed%51),true};
+        model.trend_next=(model.trend_next+1)%CHART_TREND_LENGTH;
+        if (model.trend_used<CHART_TREND_LENGTH) ++model.trend_used;
+        model.last_signal_us=(seed&1024) ? now : 0;
+        model.current_rssi=-104+(float)(seed%98);
+        model.coverage=(int)(seed%37);
+        check_update(&displayed,&model,now);
+    }
+    virtual_mode=false;
+    puts("PASS: dirty virtual LCD equals full reference through rotation/wrap, fade/timeout/scroll, sparse arcs, text/status/clear/reset/mode; clean rounds yield without pixels");
+}
+
+static void display_faults(void)
+{
+    for (unsigned fault=0;fault<3;++fault) {
+        reset(); virtual_mode=true;
+        displayed_state_t displayed={0},saved=displayed;
+        chart_model_t model; chart_init(&model,UI_SIM,1000000);
+        fail_submit=fault==0 ? 3 : 0;
+        fail_poll=fault==1 ? 4 : 0;
+        missing_result=fault==2;
+        display_work_t work;
+        assert(display_update(&displayed,&model,1000000,pixels,&work)!=ESP_OK);
+        assert(!memcmp(&saved,&displayed,sizeof(saved)) && lcd_window.failed);
+        if (fault==2) {
+            assert(pending==2 && acquired); missing_result=false;
+            assert(chart_lcd_window_end(NULL)!=ESP_OK);
+        }
+        assert(!pending && !acquired);
+        virtual_mode=false;
+    }
+    reset(); virtual_mode=true;
+    displayed_state_t displayed={0};
+    chart_model_t model; chart_init(&model,UI_SIM,1000000);
+    check_update(&displayed,&model,1000000);
+    displayed_state_t saved=displayed;
+    model.heading=90; snprintf(model.source,sizeof(model.source),"SHORT");
+    fail_submit=submits+2;
+    display_work_t work;
+    assert(display_update(&displayed,&model,1010000,pixels,&work)!=ESP_OK);
+    assert(!memcmp(&saved,&displayed,sizeof(saved)) && !pending && !acquired && lcd_window.failed);
+    virtual_mode=false;
+    puts("PASS: display failures do not commit baseline; drain accepted work, retain unknown ownership and stop");
+}
+
 int main(void)
 {
     assert(sizeof(pixels)==40960 && (uint8_t *)(pixels+CHART_LCD_BUFFER_PIXELS)-(uint8_t *)pixels==20480);
@@ -262,5 +474,5 @@ int main(void)
     puts("PASS: production rectangles without demo flag; all widths, odd rows, 1x1, offsets, tight bytes, fixed regions, CS/DC and 40/80 MHz");
     invalid_inputs(); failures();
     puts("PASS: rectangle validation, descriptor ownership, single swap, command/queue/result faults, unknown completion retains bus and buffers");
-    return 0;
+    plans(); dirty_refresh(); display_faults(); return 0;
 }
