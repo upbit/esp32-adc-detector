@@ -241,6 +241,114 @@ static void serial_task(void *arg)
     }
 }
 
+/* Temporary 80 MHz colour-fidelity experiment; removed with the demo in P5.
+ * Round 1: E0 clean, every 80 MHz variant corrupted, serial probe proving the
+ * CPU buffer always held the intended words. Round 2: pad drive made no
+ * difference. The bit ruler then measured the fault exactly -- photographs fit
+ * a 1-bit left rotation at 80 MHz and 0 bits at 40 MHz, i.e. one extra clock
+ * edge per transfer. Round 3 therefore tests the IOMUX rewiring (MOSI 8->7)
+ * that removes the GPIO-matrix skew, with 40 MHz kept as the known-good
+ * control and the far ends of the drive range as electrical cross-checks. */
+typedef struct {
+    const char *label;
+    bool fast_pixels, fast_commands, window;
+    int drive;     /* GPIO_DRIVE_CAP_0..3; 2 is the reset default. */
+    unsigned shift; /* Dummy bits prepended per block; 0 disables. */
+} colour_experiment_t;
+static const colour_experiment_t colour_experiments[]={
+    {"E7 PIX80 SHIFT1", true, false,false,2,1},
+    {"E1 PIX80 SHIFT0", true, false,false,2,0},
+    {"E8 PIX80 SHIFT2", true, false,false,2,2},
+    {"E0 PIX40 SHIFT0", false,false,false,2,0},
+};
+
+static bool experiment_button_pressed(int64_t now)
+{
+    static bool raw=true,stable=true;
+    static int64_t changed;
+    bool level=gpio_get_level(CHART_LCD_BUTTON)!=0;
+    if (level!=raw) { raw=level; changed=now; }
+    if (raw==stable || now-changed<CHART_LCD_BUTTON_DEBOUNCE_US) return false;
+    stable=raw;
+    return !stable;
+}
+
+/* Drawing a frame takes ~0.5 s, so polling once per frame samples the button
+ * about twice a second and drops ordinary presses. Poll per tile instead and
+ * latch, then apply the change at the next frame boundary. */
+static bool button_latched;
+
+static void experiment_button_poll(void)
+{
+    if (experiment_button_pressed(esp_timer_get_time())) button_latched=true;
+}
+
+static bool experiment_button_taken(void)
+{
+    bool pressed=button_latched;
+    button_latched=false;
+    return pressed;
+}
+
+/* One window for the whole frame: CS stays asserted and the clock is selected
+ * once, unlike the per-tile path that reopens and reclocks 20 times. */
+static esp_err_t render_frame_window(const chart_model_t *snapshot,int64_t now,uint16_t *pixels,
+                                     const char *label,int64_t *draw_us,int64_t *spi_us)
+{
+    esp_err_t err=chart_lcd_window_begin(0,0,320,320);
+    if (err!=ESP_OK) return err;
+    unsigned slot=0,pending=0;
+    for (int y=0;y<320 && err==ESP_OK;y+=CHART_TILE_ROWS) {
+        uint16_t *buffer=pixels+slot*CHART_LCD_BUFFER_PIXELS;
+        if (pending==2) {
+            int64_t waiting=esp_timer_get_time();
+            uint16_t *completed=NULL;
+            err=chart_lcd_window_wait(&completed);
+            if (err==ESP_OK && completed!=buffer) err=ESP_ERR_INVALID_STATE;
+            *spi_us+=esp_timer_get_time()-waiting;
+            if (err!=ESP_OK) break;
+            --pending;
+        }
+        int64_t drawing=esp_timer_get_time();
+        chart_render_tile(snapshot,now,y,CHART_TILE_ROWS,buffer);
+        chart_render_diag_swatches(y,CHART_TILE_ROWS,buffer,label);
+        chart_render_diag_ruler(y,CHART_TILE_ROWS,buffer);
+        int64_t drawn=esp_timer_get_time();
+        *draw_us+=drawn-drawing;
+        experiment_button_poll();
+        err=chart_lcd_window_submit(buffer,CHART_TILE_ROWS,y+CHART_TILE_ROWS==320);
+        *spi_us+=esp_timer_get_time()-drawn;
+        if (err!=ESP_OK) break;
+        ++pending;
+        slot^=1;
+    }
+    int64_t ending=esp_timer_get_time();
+    esp_err_t ended=chart_lcd_window_end(NULL);
+    *spi_us+=esp_timer_get_time()-ending;
+    return err==ESP_OK ? ended : err;
+}
+
+static esp_err_t render_frame_tiles(const chart_model_t *snapshot,int64_t now,uint16_t *pixels,
+                                    const char *label,int64_t *draw_us,int64_t *spi_us)
+{
+    esp_err_t err=ESP_OK;
+    for (int y=0;y<320;y+=CHART_TILE_ROWS) {
+        int rows=320-y<CHART_TILE_ROWS ? 320-y : CHART_TILE_ROWS;
+        int64_t tile_started=esp_timer_get_time();
+        chart_render_tile(snapshot,now,y,rows,pixels);
+        chart_render_diag_swatches(y,rows,pixels,label);
+        chart_render_diag_ruler(y,rows,pixels);
+        int64_t drawn=esp_timer_get_time();
+        err=chart_lcd_tile(y,rows,pixels);
+        *draw_us+=drawn-tile_started;
+        *spi_us+=esp_timer_get_time()-drawn;
+        if (err!=ESP_OK) break;
+        experiment_button_poll();
+        taskYIELD();
+    }
+    return err;
+}
+
 static void render_task(void *arg)
 {
     (void)arg;
@@ -265,25 +373,51 @@ static void render_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(CHART_LCD_TEST_MS));
     ESP_LOGI("lcd","boot test finished; starting star chart");
 #endif
+    gpio_config_t button={.pin_bit_mask=1ULL<<CHART_LCD_BUTTON,.mode=GPIO_MODE_INPUT,
+        .pull_up_en=GPIO_PULLUP_ENABLE};
+    ESP_ERROR_CHECK(gpio_config(&button));
+    unsigned experiment_index=0;
+    const colour_experiment_t *experiment=&colour_experiments[0];
+    bool setup=true;
     int64_t report_started=esp_timer_get_time(),draw_us=0,spi_us=0,frame_max_us=0;
     unsigned report_frames=0,display_frame=0;
     float display_fps=0;
-    ESP_LOGI("lcd","starting star chart at %d MHz",CHART_LCD_SPI_HZ/1000000);
     for (;;) {
+        experiment_button_poll();
+        if (experiment_button_taken()) {
+            experiment_index=(experiment_index+1)%
+                (sizeof(colour_experiments)/sizeof(*colour_experiments));
+            experiment=&colour_experiments[experiment_index];
+            setup=true;
+        }
+        if (setup) {
+            setup=false;
+            /* Only legal between closed windows, which is why it lives here. */
+            chart_lcd_fast_pixels(experiment->fast_pixels);
+            chart_lcd_fast_commands(experiment->fast_commands);
+            esp_err_t drive=chart_lcd_drive_strength(experiment->drive);
+            esp_err_t shifted=chart_lcd_shift_compensation(experiment->shift);
+            int actual_khz=0;
+            esp_err_t clocked=chart_lcd_actual_pixel_khz(&actual_khz);
+            report_started=esp_timer_get_time(); report_frames=0;
+            draw_us=spi_us=frame_max_us=0;
+            ESP_LOGI("lcd","experiment=%s pixel=%d MHz (actual %d kHz, %s) shift=%u bits (%s) drive=%d (%s)",
+                experiment->label,
+                (experiment->fast_pixels ? CHART_LCD_FAST_SPI_HZ : CHART_LCD_SPI_HZ)/1000000,
+                actual_khz,esp_err_to_name(clocked),
+                experiment->shift,esp_err_to_name(shifted),
+                experiment->drive,esp_err_to_name(drive));
+            for (int i=0;i<CHART_DIAG_SWATCHES;++i)
+                ESP_LOGI("lcd","swatch %d %-6s intended CPU-order RGB565=0x%04x",
+                    i,chart_diag_swatch_name(i),chart_diag_swatch_word(i));
+        }
         int64_t started=esp_timer_get_time();
         int64_t frame_draw_us=0,frame_spi_us=0;
         lock(); memcpy(snapshot,&model,sizeof(model)); unlock();
-        for (int y=0;y<320;y+=CHART_TILE_ROWS) {
-            int rows=320-y<CHART_TILE_ROWS ? 320-y : CHART_TILE_ROWS;
-            int64_t tile_started=esp_timer_get_time();
-            chart_render_tile(snapshot,started,y,rows,pixels);
-            int64_t drawn=esp_timer_get_time();
-            err=chart_lcd_tile(y,rows,pixels);
-            frame_draw_us+=drawn-tile_started;
-            frame_spi_us+=esp_timer_get_time()-drawn;
-            if (err!=ESP_OK) { ESP_LOGE("lcd","write: %s",esp_err_to_name(err)); break; }
-            taskYIELD();
-        }
+        err=experiment->window
+            ? render_frame_window(snapshot,started,pixels,experiment->label,&frame_draw_us,&frame_spi_us)
+            : render_frame_tiles(snapshot,started,pixels,experiment->label,&frame_draw_us,&frame_spi_us);
+        if (err!=ESP_OK) ESP_LOGE("lcd","write: %s",esp_err_to_name(err));
         int64_t finished=esp_timer_get_time();
         if (err==ESP_OK) {
             atomic_fetch_add(&frames,1);
@@ -294,9 +428,19 @@ static void render_task(void *arg)
         }
         if (finished-report_started>=5000000 && report_frames) {
             display_fps=report_frames*1000000.0f/(finished-report_started);
-            ESP_LOGI("lcd","perf fps=%.2f draw=%.2f ms/frame spi=%.2f ms/frame max_work=%.2f ms",
-                display_fps,
+            ESP_LOGI("lcd","perf %s fps=%.2f draw=%.2f ms/frame spi=%.2f ms/frame max_work=%.2f ms",
+                experiment->label,display_fps,
                 draw_us/(1000.0f*report_frames),spi_us/(1000.0f*report_frames),frame_max_us/1000.0f);
+            /* Re-render the swatch row and read it before any transmission; the
+             * transmitted copy is byte-swapped in place and would not compare.
+             * If this matches but the panel shows red, the renderer is cleared. */
+            chart_render_diag_swatches(CHART_DIAG_SWATCH_Y,CHART_DIAG_SWATCH_ROWS,pixels,NULL);
+            for (int i=0;i<CHART_DIAG_SWATCHES;++i) {
+                uint16_t got=pixels[i*CHART_DIAG_SWATCH_W+CHART_DIAG_SWATCH_W/2];
+                uint16_t want=chart_diag_swatch_word(i);
+                ESP_LOGI("lcd","probe %-6s rendered=0x%04x intended=0x%04x %s",
+                    chart_diag_swatch_name(i),got,want,got==want ? "ok" : "RENDERER MISMATCH");
+            }
             report_started=esp_timer_get_time(); report_frames=0;
             draw_us=spi_us=frame_max_us=0;
         }

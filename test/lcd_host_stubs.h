@@ -30,6 +30,7 @@ typedef struct {
 } spi_transaction_t;
 typedef void *spi_device_handle_t;
 typedef struct { uint64_t pin_bit_mask; int mode; } gpio_config_t;
+typedef int gpio_drive_cap_t;
 typedef struct { int mosi_io_num,miso_io_num,sclk_io_num,quadwp_io_num,quadhd_io_num,max_transfer_sz; } spi_bus_config_t;
 typedef struct { int clock_speed_hz,mode,spics_io_num,queue_size; } spi_device_interface_config_t;
 
@@ -37,6 +38,7 @@ int64_t esp_timer_get_time(void);
 int gpio_get_level(int pin);
 int gpio_set_level(int pin,int value);
 esp_err_t gpio_config(const gpio_config_t *config);
+esp_err_t gpio_set_drive_capability(int pin,gpio_drive_cap_t capability);
 void vTaskDelay(int ticks);
 esp_err_t spi_bus_initialize(int host,const spi_bus_config_t *config,int dma);
 esp_err_t spi_bus_add_device(int host,const spi_device_interface_config_t *config,spi_device_handle_t *handle);

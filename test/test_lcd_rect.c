@@ -28,6 +28,12 @@ int64_t esp_timer_get_time(void) { return ++clock_us; }
 int gpio_get_level(int pin) { (void)pin; return 1; }
 int gpio_set_level(int pin,int value) { assert(pin==CHART_LCD_DC && !pending); dc=value; return 0; }
 esp_err_t gpio_config(const gpio_config_t *config) { (void)config; return ESP_OK; }
+esp_err_t gpio_set_drive_capability(int pin,gpio_drive_cap_t capability)
+{
+    assert(pin==CHART_LCD_MOSI || pin==CHART_LCD_SCK);
+    assert(capability>=0 && capability<=3);
+    return ESP_OK;
+}
 void vTaskDelay(int ticks) { clock_us+=ticks*1000; }
 esp_err_t spi_bus_initialize(int host,const spi_bus_config_t *config,int dma)
 {

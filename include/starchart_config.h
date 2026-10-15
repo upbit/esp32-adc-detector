@@ -1,7 +1,10 @@
 #pragma once
 
 /* Confirmed wiring from README.md. Panel settings below require module checks. */
-#define CHART_LCD_MOSI 8
+/* GPIO7 is the SPI2 IOMUX MOSI pad on the C5; with SCK=6 and CS=10 the whole
+ * bus leaves through the IOMUX instead of the GPIO matrix, which removes the
+ * skew that corrupted 80 MHz pixels (photo-measured 1-bit shift, 2026-10-15). */
+#define CHART_LCD_MOSI 7
 #define CHART_LCD_SCK 6
 #define CHART_LCD_CS 10
 #define CHART_LCD_DC 9
@@ -33,6 +36,20 @@
 #define CHART_LCD_REFRESH_Y 96
 #define CHART_LCD_REFRESH_HEIGHT 128 /* Two independently animated 64-row bands. */
 #define CHART_TILE_ROWS 16
+/* Temporary 80 MHz colour-fidelity experiment; removed with the demo in P5.
+ * Amber is the only palette entry with a saturated red channel and live G/B
+ * bits, so it is the one colour that can expose low-bit loss on the wire.
+ * The band deliberately covers the bottom status rows while experimenting. */
+#define CHART_DIAG_SWATCH_Y 306
+#define CHART_DIAG_SWATCH_ROWS 14
+#define CHART_DIAG_SWATCH_W 48
+/* Bit ruler: 16 blocks of 20 px, block k holding only bit k. A stream shifted
+ * by n bits slides the pattern n blocks left. The scale rows use 0x0000/0xffff,
+ * the two words a rotation cannot change, giving a trustworthy spatial scale. */
+#define CHART_DIAG_RULER_Y 284
+#define CHART_DIAG_RULER_ROWS 22
+#define CHART_DIAG_RULER_SCALE 5
+#define CHART_DIAG_RULER_W 20
 #define CHART_DIRTY_CELL 16
 #define CHART_DIRTY_COLS (320 / CHART_DIRTY_CELL)
 #define CHART_DIRTY_ROWS (320 / CHART_DIRTY_CELL)

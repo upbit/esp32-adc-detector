@@ -17,6 +17,23 @@ static __attribute__((noinline)) void lcd_swap_optimized(uint16_t *pixels,size_t
 
 #ifndef CHART_LCD_SWAP_HOST_TEST
 
+/* Temporary 80 MHz experiment: the panel samples one bit period late, so a
+ * uniform block comes back rotated left by one bit. Prepending one dummy bit
+ * absorbs that late first sample and realigns everything after it. Operates on
+ * the wire-order bytes, after the RGB565 swap, and writes count+1 bytes.
+ * Deliberately the simplest possible loop: this run only has to answer whether
+ * pre-compensation works at all, not how fast it can be made. */
+static __attribute__((noinline)) void lcd_shift_stream(uint8_t *bytes,size_t count,unsigned bits)
+{
+    unsigned carry=0;
+    for (size_t i=0;i<count;++i) {
+        unsigned v=bytes[i];
+        bytes[i]=(uint8_t)((carry<<(8-bits))|(v>>bits));
+        carry=v&((1u<<bits)-1);
+    }
+    bytes[count]=(uint8_t)(carry<<(8-bits));
+}
+
 #include "chart_hardware.h"
 
 #include <stdatomic.h>
@@ -32,11 +49,16 @@ static __attribute__((noinline)) void lcd_swap_optimized(uint16_t *pixels,size_t
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
+#include "soc/spi_pins.h"
 #endif
 
 static spi_device_handle_t lcd;
 static size_t lcd_dma_max;
 static uint32_t lcd_pixel_hz=CHART_LCD_SPI_HZ;
+/* Temporary 80 MHz experiment: lets one frame avoid switching clocks at all. */
+static uint32_t lcd_command_hz=CHART_LCD_SPI_HZ;
+/* Temporary 80 MHz experiment: dummy bits prepended to each pixel block. */
+static unsigned lcd_shift_bits;
 #ifndef CHART_LCD_HOST_TEST
 static i2c_master_dev_handle_t imu;
 static QueueHandle_t signal_queue;
@@ -87,8 +109,8 @@ static esp_err_t lcd_send(int dc,const void *data,size_t length,uint32_t hz)
 
 static esp_err_t lcd_command(uint8_t command,const uint8_t *data,size_t n)
 {
-    TRY(lcd_send(0,&command,1,CHART_LCD_SPI_HZ));
-    return lcd_send(1,data,n,CHART_LCD_SPI_HZ);
+    TRY(lcd_send(0,&command,1,lcd_command_hz));
+    return lcd_send(1,data,n,lcd_command_hz);
 }
 
 esp_err_t chart_lcd_init(void)
@@ -130,6 +152,13 @@ esp_err_t chart_lcd_init(void)
     if (CHART_LCD_BL>=0) gpio_set_level(CHART_LCD_BL,CHART_LCD_BL_ACTIVE);
     ESP_LOGI("lcd","pixel transfer: rectangular DMA queue=2; region=%d bytes; transaction limit=%u bytes; full-width block=%u rows",
         CHART_LCD_BUFFER_BYTES,(unsigned)lcd_dma_max,(unsigned)(lcd_dma_max/(320*2)));
+    /* SPI2 reaches the IOMUX only when every pin matches; one mismatch routes
+     * the whole bus (including SCK) through the GPIO matrix and adds skew. */
+    ESP_LOGW("lcd","SPI2 IOMUX pins are MOSI=%d SCK=%d CS=%d; configured MOSI=%d SCK=%d CS=%d -> %s",
+        SPI2_IOMUX_PIN_NUM_MOSI,SPI2_IOMUX_PIN_NUM_CLK,SPI2_IOMUX_PIN_NUM_CS,
+        CHART_LCD_MOSI,CHART_LCD_SCK,CHART_LCD_CS,
+        (CHART_LCD_MOSI==SPI2_IOMUX_PIN_NUM_MOSI && CHART_LCD_SCK==SPI2_IOMUX_PIN_NUM_CLK)
+            ? "IOMUX" : "GPIO matrix (extra skew at 80 MHz)");
     ESP_LOGW("lcd","ST7796 DCS candidate; window offset %d,%d BGR=%d rotation=%d mirror_x=%d MADCTL=0x%02x: verify on module",
         CHART_LCD_X_OFFSET,CHART_LCD_Y_OFFSET,CHART_LCD_BGR,CHART_LCD_ROTATION,
         CHART_LCD_MIRROR_X,orientation);
@@ -153,7 +182,14 @@ static esp_err_t lcd_tile_write(int y,int rows,uint16_t *pixels,chart_lcd_write_
     TRY(lcd_command(0x2c,NULL,0));
     if (timing) TRY(spi_device_get_actual_freq(lcd,&timing->command_khz));
     int64_t commanded=timing ? esp_timer_get_time() : 0;
-    esp_err_t err=lcd_send(1,pixels,320*rows*2,lcd_pixel_hz);
+    size_t length=(size_t)320*rows*2;
+    /* The caller's region is CHART_LCD_BUFFER_BYTES, larger than any tile, so
+     * the pre-compensation carry byte has somewhere to land. */
+    if (lcd_shift_bits && length+1<=CHART_LCD_BUFFER_BYTES) {
+        lcd_shift_stream((uint8_t *)pixels,length,lcd_shift_bits);
+        ++length;
+    }
+    esp_err_t err=lcd_send(1,pixels,length,lcd_pixel_hz);
     if (timing) {
         timing->swap_us=mode==CHART_LCD_WRITE_WIRE ? 0 : swapped-addressed;
         timing->command_us=addressed-started+commanded-swapped;
@@ -167,6 +203,41 @@ void chart_lcd_fast_pixels(bool enabled)
 {
     if (lcd_window.open || lcd_window.failed) return;
     lcd_pixel_hz=enabled ? CHART_LCD_FAST_SPI_HZ : CHART_LCD_SPI_HZ;
+}
+
+void chart_lcd_fast_commands(bool enabled)
+{
+    if (lcd_window.open || lcd_window.failed) return;
+    lcd_command_hz=enabled ? CHART_LCD_FAST_SPI_HZ : CHART_LCD_SPI_HZ;
+}
+
+/* Temporary 80 MHz experiment: MOSI/SCK leave through the GPIO matrix, so edge
+ * rate is load-limited. Stronger pads sharpen edges and buy setup time. */
+esp_err_t chart_lcd_drive_strength(int capability)
+{
+    if (lcd_window.open || lcd_window.failed) return ESP_ERR_INVALID_STATE;
+    if (capability<0 || capability>3) return ESP_ERR_INVALID_ARG;
+    TRY(gpio_set_drive_capability(CHART_LCD_MOSI,(gpio_drive_cap_t)capability));
+    return gpio_set_drive_capability(CHART_LCD_SCK,(gpio_drive_cap_t)capability);
+}
+
+/* Temporary 80 MHz experiment: prepend `bits` dummy bits to every pixel block
+ * so a panel that samples late realigns. 0 disables. Same call restrictions. */
+esp_err_t chart_lcd_shift_compensation(unsigned bits)
+{
+    if (lcd_window.open || lcd_window.failed) return ESP_ERR_INVALID_STATE;
+    if (bits>7) return ESP_ERR_INVALID_ARG;
+    lcd_shift_bits=bits;
+    return ESP_OK;
+}
+
+/* Reports the clock the driver actually programmed, not the requested value. */
+esp_err_t chart_lcd_actual_pixel_khz(int *khz)
+{
+    if (lcd_window.open || lcd_window.failed) return ESP_ERR_INVALID_STATE;
+    uint8_t nop=0x00;
+    TRY(lcd_send(1,&nop,1,lcd_pixel_hz));
+    return spi_device_get_actual_freq(lcd,khz);
 }
 
 esp_err_t chart_lcd_tile(int y,int rows,uint16_t *pixels)

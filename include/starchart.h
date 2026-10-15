@@ -79,8 +79,17 @@ void chart_render_tile(const chart_model_t *snapshot, int64_t now, int y, int ro
 void chart_mark_dirty(const chart_model_t *previous, int64_t previous_time,
                       const chart_model_t *current, int64_t current_time,
                       chart_dirty_mask_t *mask);
-void chart_render_test_tile(int y, int rows, uint16_t *rgb565);
-void chart_render_test_overlay(int y, int rows, uint16_t *rgb565,
+/* Temporary 80 MHz colour experiment: five flat swatches over the status row,
+ * drawn by the normal renderer so they share the pixel path under test.
+ * chart_diag_swatch_word returns the CPU-order RGB565 the renderer intends,
+ * so the serial probe can be compared against what the panel shows. */
+#define CHART_DIAG_SWATCHES 5
+uint16_t chart_diag_swatch_word(int index);
+const char *chart_diag_swatch_name(int index);
+void chart_render_diag_swatches(int y, int rows, uint16_t *rgb565, const char *label);
+/* Bit ruler: block k holds only bit k; a shifted stream slides it k blocks. */
+void chart_render_diag_ruler(int y, int rows, uint16_t *rgb565);
+void chart_render_test_tile(int y, int rows, uint16_t *rgb565);void chart_render_test_overlay(int y, int rows, uint16_t *rgb565,
                                const char *label, unsigned frame);
 void chart_render_refresh_tile(int y, int rows, uint16_t *rgb565,
                                const char *strategy, float fps, int64_t elapsed_us,

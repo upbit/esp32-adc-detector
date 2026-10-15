@@ -441,6 +441,81 @@ void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_
     chart_render_rect(m,now,0,y,320,rows,buffer);
 }
 
+/* Temporary 80 MHz colour experiment; removed with the demo in P5. Amber is the
+ * only palette colour with a saturated red channel and live G/B bits, so the
+ * cyan/white/muted/grid neighbours act as its controls. */
+static const color_t *diag_swatch(int index)
+{
+    static const color_t *const swatches[CHART_DIAG_SWATCHES]=
+        {&amber,&cyan,&white,&muted,&grid};
+    if (index<0 || index>=CHART_DIAG_SWATCHES) return NULL;
+    return swatches[index];
+}
+
+uint16_t chart_diag_swatch_word(int index)
+{
+    const color_t *c=diag_swatch(index);
+    return c ? pack(*c) : 0;
+}
+
+const char *chart_diag_swatch_name(int index)
+{
+    static const char *const names[CHART_DIAG_SWATCHES]=
+        {"amber","cyan","white","muted","grid"};
+    if (index<0 || index>=CHART_DIAG_SWATCHES) return "?";
+    return names[index];
+}
+
+/* Writes a raw RGB565 word, bypassing colour_t so single-bit values survive. */
+static void raw_pixel(int x,int y,uint16_t word)
+{
+    if (x<tile_x || x>=tile_x+tile_width || y<tile_y || y>=tile_y+tile_rows) return;
+    tile[(y-tile_y)*tile_width+(x-tile_x)]=word;
+}
+
+/* Bit ruler: block k carries only bit k, so a stream shifted by n bits shows
+ * the pattern slid n blocks left. Reading it needs counting, not colour
+ * judgement, which a camera's white balance cannot distort. */
+void chart_render_diag_ruler(int y,int rows,uint16_t *buffer)
+{
+    if (y<0 || y>=320 || rows<=0 || rows>320-y) return;
+    const int top=CHART_DIAG_RULER_Y,bottom=top+CHART_DIAG_RULER_ROWS;
+    if (y>=bottom || y+rows<=top) return;
+    set_tile(buffer,0,y,320,rows);
+    int from=y>top ? y : top,to=y+rows<bottom ? y+rows : bottom;
+    for (int py=from;py<to;++py)
+        for (int i=0;i<16;++i) {
+            /* 0x0000/0xffff are rotation fixed points: the scale stays valid
+             * however far the stream has shifted. */
+            uint16_t word=py<top+CHART_DIAG_RULER_SCALE ? (i%2 ? 0xffff : 0x0000)
+                                                        : (uint16_t)(1u<<i);
+            for (int x=i*CHART_DIAG_RULER_W;x<(i+1)*CHART_DIAG_RULER_W;++x)
+                raw_pixel(x,py,word);
+        }
+}
+
+/* Overlays the swatch band onto whichever tile covers it; other rows untouched. */
+void chart_render_diag_swatches(int y,int rows,uint16_t *buffer,const char *label)
+{
+    if (y<0 || y>=320 || rows<=0 || rows>320-y) return;
+    const int top=CHART_DIAG_SWATCH_Y,bottom=top+CHART_DIAG_SWATCH_ROWS;
+    if (y>=bottom || y+rows<=top) return;
+    set_tile(buffer,0,y,320,rows);
+    int from=y>top ? y : top,to=y+rows<bottom ? y+rows : bottom;
+    for (int py=from;py<to;++py) {
+        for (int i=0;i<CHART_DIAG_SWATCHES;++i) {
+            const color_t *c=diag_swatch(i);
+            for (int x=i*CHART_DIAG_SWATCH_W;x<(i+1)*CHART_DIAG_SWATCH_W;++x)
+                pixel(x,py,*c,15);
+        }
+        /* Keep the label area flat so no swatch is tinted by text pixels. */
+        for (int x=CHART_DIAG_SWATCHES*CHART_DIAG_SWATCH_W;x<320;++x) pixel(x,py,bg,15);
+    }
+    if (label) text(label,CHART_DIAG_SWATCHES*CHART_DIAG_SWATCH_W+3,
+                    top+CHART_DIAG_SWATCH_ROWS-2-ink_bottom(CHART_FONT_TICK),
+                    CHART_FONT_TICK,white,320);
+}
+
 void chart_render_test_tile(int y,int rows,uint16_t *buffer)
 {
     set_tile(buffer,0,y,320,rows);

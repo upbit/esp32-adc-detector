@@ -20,6 +20,16 @@ esp_err_t chart_lcd_tile_profiled(int y,int rows,uint16_t *pixels,chart_lcd_writ
                                  chart_lcd_timing_t *timing);
 /* Call only between completed transfers; all commands remain at baseline clock. */
 void chart_lcd_fast_pixels(bool enabled);
+/* Temporary 80 MHz experiment only: raises the command clock so a frame can run
+ * without switching clocks per window. Same call restrictions as fast_pixels. */
+void chart_lcd_fast_commands(bool enabled);
+/* Temporary 80 MHz experiment only: 0..3 pad drive for MOSI/SCK. */
+esp_err_t chart_lcd_drive_strength(int capability);
+/* Temporary 80 MHz experiment only: prepend `bits` (0..7) dummy bits to each
+ * pixel block, compensating a panel that latches one bit period late. */
+esp_err_t chart_lcd_shift_compensation(unsigned bits);
+/* Temporary 80 MHz experiment only: clock the driver really programmed. */
+esp_err_t chart_lcd_actual_pixel_khz(int *khz);
 /* Single display-task owner. Close/drain before any tile write or mode change. */
 esp_err_t chart_lcd_window_begin(int x,int y,int width,int rows);
 /* CPU-order RGB565; <=32 rows and within the queried transaction limit.
