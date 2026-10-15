@@ -30,15 +30,12 @@ typedef struct {
 } spi_transaction_t;
 typedef void *spi_device_handle_t;
 typedef struct { uint64_t pin_bit_mask; int mode; } gpio_config_t;
-typedef int gpio_drive_cap_t;
 typedef struct { int mosi_io_num,miso_io_num,sclk_io_num,quadwp_io_num,quadhd_io_num,max_transfer_sz; } spi_bus_config_t;
 typedef struct { int clock_speed_hz,mode,spics_io_num,queue_size; } spi_device_interface_config_t;
 
 int64_t esp_timer_get_time(void);
-int gpio_get_level(int pin);
 int gpio_set_level(int pin,int value);
 esp_err_t gpio_config(const gpio_config_t *config);
-esp_err_t gpio_set_drive_capability(int pin,gpio_drive_cap_t capability);
 void vTaskDelay(int ticks);
 esp_err_t spi_bus_initialize(int host,const spi_bus_config_t *config,int dma);
 esp_err_t spi_bus_add_device(int host,const spi_device_interface_config_t *config,spi_device_handle_t *handle);
@@ -47,6 +44,5 @@ esp_err_t spi_device_get_actual_freq(spi_device_handle_t handle,int *khz);
 esp_err_t spi_device_acquire_bus(spi_device_handle_t handle,int ticks);
 void spi_device_release_bus(spi_device_handle_t handle);
 esp_err_t spi_device_polling_transmit(spi_device_handle_t handle,spi_transaction_t *t);
-esp_err_t spi_device_transmit(spi_device_handle_t handle,spi_transaction_t *t);
 esp_err_t spi_device_queue_trans(spi_device_handle_t handle,spi_transaction_t *t,int ticks);
 esp_err_t spi_device_get_trans_result(spi_device_handle_t handle,spi_transaction_t **t,int ticks);

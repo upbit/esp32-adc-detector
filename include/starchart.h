@@ -72,31 +72,24 @@ void chart_render_init(void);
 /* Full-screen coordinates, tight width stride, CPU byte order. Invalid rects do not write. */
 void chart_render_rect(const chart_model_t *snapshot, int64_t now,
                        int x, int y, int width, int rows, uint16_t *rgb565);
-/* Full-width reference entry retained through P5. */
+/* Full-width reference entry for host previews and correctness tests. */
 void chart_render_tile(const chart_model_t *snapshot, int64_t now, int y, int rows,
                        uint16_t *rgb565);
 /* Approved P4 interface; implementation and callers arrive with dirty refresh. */
 void chart_mark_dirty(const chart_model_t *previous, int64_t previous_time,
                       const chart_model_t *current, int64_t current_time,
                       chart_dirty_mask_t *mask);
-/* Temporary 80 MHz colour experiment: five flat swatches over the status row,
- * drawn by the normal renderer so they share the pixel path under test.
- * chart_diag_swatch_word returns the CPU-order RGB565 the renderer intends,
- * so the serial probe can be compared against what the panel shows. */
+/* Colour/alignment diagnostics, compiled only when explicitly enabled. The bit
+ * ruler puts bit k in block k so a shifted pixel stream slides it k blocks; the
+ * 0x0000/0xffff scale rows are rotation fixed points and stay readable however
+ * far the stream has moved. Retained because the 80 MHz shift compensation is
+ * calibrated for one bit and the panel may drift. */
+#if CHART_LCD_SHIFT_DIAGNOSTIC
 #define CHART_DIAG_SWATCHES 5
 uint16_t chart_diag_swatch_word(int index);
 const char *chart_diag_swatch_name(int index);
-void chart_render_diag_swatches(int y, int rows, uint16_t *rgb565, const char *label);
-/* Bit ruler: block k holds only bit k; a shifted stream slides it k blocks. */
-void chart_render_diag_ruler(int y, int rows, uint16_t *rgb565);
-void chart_render_test_tile(int y, int rows, uint16_t *rgb565);void chart_render_test_overlay(int y, int rows, uint16_t *rgb565,
-                               const char *label, unsigned frame);
-void chart_render_refresh_tile(int y, int rows, uint16_t *rgb565,
-                               const char *strategy, float fps, int64_t elapsed_us,
-                               unsigned frame);
-/* Motion region only: REFRESH_Y <= y, y + rows <= REFRESH_Y + REFRESH_HEIGHT. */
-void chart_render_refresh_band(int y, int rows, uint16_t *rgb565,
-                               int64_t elapsed_us, unsigned frame);
-/* Same motion raster, stored as MSB-first bytes for direct LCD transmission. */
-void chart_render_refresh_band_wire(int y, int rows, uint16_t *pixels,
-                                    int64_t elapsed_us, unsigned frame);
+void chart_render_diag_swatches(int x, int y, int width, int rows,
+                                uint16_t *rgb565, const char *label);
+void chart_render_diag_ruler(int x, int y, int width, int rows, uint16_t *rgb565);
+#endif
+void chart_render_test_tile(int y, int rows, uint16_t *rgb565);

@@ -1,12 +1,8 @@
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-static __attribute__((noinline)) void lcd_swap_baseline(uint16_t *pixels,size_t count)
-{
-    for (size_t i=0;i<count;++i) pixels[i]=(pixels[i]<<8)|(pixels[i]>>8);
-}
-
-/* Same loop, isolated compile level so the baseline and other drivers stay unchanged. */
+/* Keep the pixel swap at O2 without changing the other hardware drivers. */
 #if defined(__GNUC__) && !defined(__clang__)
 __attribute__((optimize("O2")))
 #endif
@@ -17,21 +13,27 @@ static __attribute__((noinline)) void lcd_swap_optimized(uint16_t *pixels,size_t
 
 #ifndef CHART_LCD_SWAP_HOST_TEST
 
-/* Temporary 80 MHz experiment: the panel samples one bit period late, so a
+/* At the fast clock the panel starts sampling one bit period late, so every
  * uniform block comes back rotated left by one bit. Prepending one dummy bit
- * absorbs that late first sample and realigns everything after it. Operates on
- * the wire-order bytes, after the RGB565 swap, and writes count+1 bytes.
- * Deliberately the simplest possible loop: this run only has to answer whether
- * pre-compensation works at all, not how fast it can be made. */
-static __attribute__((noinline)) void lcd_shift_stream(uint8_t *bytes,size_t count,unsigned bits)
+ * absorbs that late first sample and realigns the rest.
+ *
+ * A window keeps CS asserted across its blocks, so the panel sees ONE
+ * continuous bit stream: the dummy bit belongs to the window, not to each
+ * block. Shifting blocks independently would push the stream a further 7 bits
+ * at every boundary and band the image. `carry` therefore threads the bits
+ * displaced out of one block into the next, and only the final block emits the
+ * trailing byte. Operates on wire-order bytes, after the RGB565 swap.
+ * Returns the bits carried out of this block. */
+static __attribute__((noinline)) unsigned lcd_shift_stream(uint8_t *bytes,size_t count,
+                                                           unsigned bits,unsigned carry,bool last)
 {
-    unsigned carry=0;
     for (size_t i=0;i<count;++i) {
         unsigned v=bytes[i];
         bytes[i]=(uint8_t)((carry<<(8-bits))|(v>>bits));
         carry=v&((1u<<bits)-1);
     }
-    bytes[count]=(uint8_t)(carry<<(8-bits));
+    if (last) bytes[count]=(uint8_t)(carry<<(8-bits));
+    return carry;
 }
 
 #include "chart_hardware.h"
@@ -55,10 +57,6 @@ static __attribute__((noinline)) void lcd_shift_stream(uint8_t *bytes,size_t cou
 static spi_device_handle_t lcd;
 static size_t lcd_dma_max;
 static uint32_t lcd_pixel_hz=CHART_LCD_SPI_HZ;
-/* Temporary 80 MHz experiment: lets one frame avoid switching clocks at all. */
-static uint32_t lcd_command_hz=CHART_LCD_SPI_HZ;
-/* Temporary 80 MHz experiment: dummy bits prepended to each pixel block. */
-static unsigned lcd_shift_bits;
 #ifndef CHART_LCD_HOST_TEST
 static i2c_master_dev_handle_t imu;
 static QueueHandle_t signal_queue;
@@ -71,6 +69,7 @@ static bool wifi_initialized;
 static struct {
     bool open,last,failed;
     int width;
+    unsigned carry; /* Bits displaced out of the previous block in this window. */
     size_t remaining;
     unsigned pending,next;
     spi_transaction_t tx[2];
@@ -80,37 +79,21 @@ static struct {
 
 #define TRY(call) do { esp_err_t e=(call); if (e!=ESP_OK) return e; } while (0)
 
-static esp_err_t lcd_send(int dc,const void *data,size_t length,uint32_t hz)
+static esp_err_t lcd_send(int dc,const void *data,size_t length)
 {
     if (!length) return ESP_OK;
     gpio_set_level(CHART_LCD_DC,dc);
-    spi_transaction_t t={.length=length*8,.tx_buffer=data,.override_freq_hz=hz};
-    if (length<=sizeof(t.tx_data)) {
-        t.flags=SPI_TRANS_USE_TXDATA;
-        memcpy(t.tx_data,data,length);
-        return spi_device_polling_transmit(lcd,&t);
-    }
-    if (length<=lcd_dma_max)
-        return spi_device_transmit(lcd,&t);
-    /* Larger tiles span transactions; keep CS asserted and wait before reuse. */
-    TRY(spi_device_acquire_bus(lcd,portMAX_DELAY));
-    const uint8_t *bytes=data;
-    esp_err_t err=ESP_OK;
-    while (length && err==ESP_OK) {
-        size_t n=length<lcd_dma_max ? length : lcd_dma_max;
-        t=(spi_transaction_t){.length=n*8,.tx_buffer=bytes,
-            .flags=length>n ? SPI_TRANS_CS_KEEP_ACTIVE : 0,.override_freq_hz=hz};
-        err=spi_device_transmit(lcd,&t);
-        bytes+=n; length-=n;
-    }
-    spi_device_release_bus(lcd);
-    return err;
+    /* All initialization and window commands have at most four parameter bytes. */
+    spi_transaction_t t={.length=length*8,.flags=SPI_TRANS_USE_TXDATA,
+        .override_freq_hz=CHART_LCD_SPI_HZ};
+    memcpy(t.tx_data,data,length);
+    return spi_device_polling_transmit(lcd,&t);
 }
 
 static esp_err_t lcd_command(uint8_t command,const uint8_t *data,size_t n)
 {
-    TRY(lcd_send(0,&command,1,lcd_command_hz));
-    return lcd_send(1,data,n,lcd_command_hz);
+    TRY(lcd_send(0,&command,1));
+    return lcd_send(1,data,n);
 }
 
 esp_err_t chart_lcd_init(void)
@@ -132,7 +115,7 @@ esp_err_t chart_lcd_init(void)
         .mode=0,.spics_io_num=CHART_LCD_CS,.queue_size=2};
     TRY(spi_bus_add_device(SPI2_HOST,&device,&lcd));
     TRY(spi_bus_get_max_transaction_len(SPI2_HOST,&lcd_dma_max));
-    lcd_dma_max&=~(size_t)3; /* Keep legacy synchronous split addresses word aligned, not pixel lengths. */
+    lcd_dma_max&=~(size_t)3; /* Retain the validated limit; individual TX lengths may be odd words. */
     /* Conservative ST7796 DCS bring-up. Vendor power/gamma table is not verified. */
     TRY(lcd_command(0x01,NULL,0));
     int actual_khz=0;
@@ -165,90 +148,10 @@ esp_err_t chart_lcd_init(void)
     return ESP_OK;
 }
 
-static esp_err_t lcd_tile_write(int y,int rows,uint16_t *pixels,chart_lcd_write_mode_t mode,
-                               chart_lcd_timing_t *timing)
-{
-    if (lcd_window.open || lcd_window.failed) return ESP_ERR_INVALID_STATE;
-    int x1=CHART_LCD_X_OFFSET,x2=x1+319,y1=CHART_LCD_Y_OFFSET+y,y2=y1+rows-1;
-    uint8_t xs[]={x1>>8,x1&255,x2>>8,x2&255}, ys[]={y1>>8,y1&255,y2>>8,y2&255};
-    if (timing) *timing=(chart_lcd_timing_t){0};
-    int64_t started=timing ? esp_timer_get_time() : 0;
-    TRY(lcd_command(0x2a,xs,sizeof(xs)));
-    TRY(lcd_command(0x2b,ys,sizeof(ys)));
-    int64_t addressed=timing ? esp_timer_get_time() : 0;
-    if (mode==CHART_LCD_WRITE_SWAP_O2) lcd_swap_optimized(pixels,320*rows);
-    else if (mode==CHART_LCD_WRITE_SWAP) lcd_swap_baseline(pixels,320*rows);
-    int64_t swapped=timing ? esp_timer_get_time() : 0;
-    TRY(lcd_command(0x2c,NULL,0));
-    if (timing) TRY(spi_device_get_actual_freq(lcd,&timing->command_khz));
-    int64_t commanded=timing ? esp_timer_get_time() : 0;
-    size_t length=(size_t)320*rows*2;
-    /* The caller's region is CHART_LCD_BUFFER_BYTES, larger than any tile, so
-     * the pre-compensation carry byte has somewhere to land. */
-    if (lcd_shift_bits && length+1<=CHART_LCD_BUFFER_BYTES) {
-        lcd_shift_stream((uint8_t *)pixels,length,lcd_shift_bits);
-        ++length;
-    }
-    esp_err_t err=lcd_send(1,pixels,length,lcd_pixel_hz);
-    if (timing) {
-        timing->swap_us=mode==CHART_LCD_WRITE_WIRE ? 0 : swapped-addressed;
-        timing->command_us=addressed-started+commanded-swapped;
-        timing->dma_us=esp_timer_get_time()-commanded;
-        if (err==ESP_OK) TRY(spi_device_get_actual_freq(lcd,&timing->pixel_khz));
-    }
-    return err;
-}
-
 void chart_lcd_fast_pixels(bool enabled)
 {
     if (lcd_window.open || lcd_window.failed) return;
     lcd_pixel_hz=enabled ? CHART_LCD_FAST_SPI_HZ : CHART_LCD_SPI_HZ;
-}
-
-void chart_lcd_fast_commands(bool enabled)
-{
-    if (lcd_window.open || lcd_window.failed) return;
-    lcd_command_hz=enabled ? CHART_LCD_FAST_SPI_HZ : CHART_LCD_SPI_HZ;
-}
-
-/* Temporary 80 MHz experiment: MOSI/SCK leave through the GPIO matrix, so edge
- * rate is load-limited. Stronger pads sharpen edges and buy setup time. */
-esp_err_t chart_lcd_drive_strength(int capability)
-{
-    if (lcd_window.open || lcd_window.failed) return ESP_ERR_INVALID_STATE;
-    if (capability<0 || capability>3) return ESP_ERR_INVALID_ARG;
-    TRY(gpio_set_drive_capability(CHART_LCD_MOSI,(gpio_drive_cap_t)capability));
-    return gpio_set_drive_capability(CHART_LCD_SCK,(gpio_drive_cap_t)capability);
-}
-
-/* Temporary 80 MHz experiment: prepend `bits` dummy bits to every pixel block
- * so a panel that samples late realigns. 0 disables. Same call restrictions. */
-esp_err_t chart_lcd_shift_compensation(unsigned bits)
-{
-    if (lcd_window.open || lcd_window.failed) return ESP_ERR_INVALID_STATE;
-    if (bits>7) return ESP_ERR_INVALID_ARG;
-    lcd_shift_bits=bits;
-    return ESP_OK;
-}
-
-/* Reports the clock the driver actually programmed, not the requested value. */
-esp_err_t chart_lcd_actual_pixel_khz(int *khz)
-{
-    if (lcd_window.open || lcd_window.failed) return ESP_ERR_INVALID_STATE;
-    uint8_t nop=0x00;
-    TRY(lcd_send(1,&nop,1,lcd_pixel_hz));
-    return spi_device_get_actual_freq(lcd,khz);
-}
-
-esp_err_t chart_lcd_tile(int y,int rows,uint16_t *pixels)
-{
-    return lcd_tile_write(y,rows,pixels,CHART_LCD_WRITE_SWAP,NULL);
-}
-
-esp_err_t chart_lcd_tile_profiled(int y,int rows,uint16_t *pixels,chart_lcd_write_mode_t mode,
-                                 chart_lcd_timing_t *timing)
-{
-    return lcd_tile_write(y,rows,pixels,mode,timing);
 }
 
 esp_err_t chart_lcd_window_begin(int x,int y,int width,int rows)
@@ -285,7 +188,13 @@ esp_err_t chart_lcd_window_submit(uint16_t *pixels,int rows,bool last)
         return ESP_ERR_INVALID_STATE;
     if (!pixels || rows<=0 || rows>CHART_LCD_PIPE_ROWS) return ESP_ERR_INVALID_ARG;
     size_t length=(size_t)lcd_window.width*rows*2;
-    if (length>lcd_dma_max || length>lcd_window.remaining || last!=(length==lcd_window.remaining))
+    /* Compensation appends a carry byte, so the wire is one byte longer than
+     * the pixels. Reject a block that would not fit rather than silently
+     * sending it uncompensated, which would corrupt every colour. */
+    bool compensate=CHART_LCD_SHIFT_BITS && lcd_pixel_hz!=CHART_LCD_SPI_HZ;
+    size_t extra=compensate && last ? 1 : 0; /* Only the final block carries it. */
+    if (length+extra>lcd_dma_max || length+extra>CHART_LCD_BUFFER_BYTES ||
+        length>lcd_window.remaining || last!=(length==lcd_window.remaining))
         return ESP_ERR_INVALID_ARG;
     for (unsigned i=0;i<lcd_window.pending;++i) {
         const spi_transaction_t *t=&lcd_window.tx[(lcd_window.next+2-lcd_window.pending+i)%2];
@@ -294,9 +203,17 @@ esp_err_t chart_lcd_window_submit(uint16_t *pixels,int rows,bool last)
     }
     int64_t started=esp_timer_get_time();
     lcd_swap_optimized(pixels,length/2);
+    /* One dummy bit per window, not per block: thread the displaced bits into
+     * the next block so the panel sees a single continuous stream, and let only
+     * the last block emit the trailing byte. Window bookkeeping keeps using the
+     * true pixel length, not the wire one. */
+    if (compensate)
+        lcd_window.carry=lcd_shift_stream((uint8_t *)pixels,length,
+                                          CHART_LCD_SHIFT_BITS,lcd_window.carry,last);
+    size_t wire=length+extra;
     lcd_window.timing.swap_us+=esp_timer_get_time()-started;
     spi_transaction_t *t=&lcd_window.tx[lcd_window.next];
-    *t=(spi_transaction_t){.length=length*8,.tx_buffer=pixels,.override_freq_hz=lcd_pixel_hz,
+    *t=(spi_transaction_t){.length=wire*8,.tx_buffer=pixels,.override_freq_hz=lcd_pixel_hz,
         .flags=SPI_TRANS_DMA_BUFFER_ALIGN_MANUAL | (last ? 0 : SPI_TRANS_CS_KEEP_ACTIVE)};
     if (!lcd_window.first_submit) lcd_window.first_submit=esp_timer_get_time();
     esp_err_t err=spi_device_queue_trans(lcd,t,portMAX_DELAY);

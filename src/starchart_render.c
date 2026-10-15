@@ -16,6 +16,21 @@ static float sine[720], cosine[720];
 static uint16_t distance_lut[CHART_DISTANCE_LUT];
 static uint16_t *tile;
 static int tile_x, tile_y, tile_width, tile_rows;
+static chart_dirty_mask_t *dirty_target;
+
+static void dirty_bounds(int left,int top,int right,int bottom)
+{
+    if (right<0 || bottom<0 || left>=320 || top>=320) return;
+    if (left<0) left=0;
+    if (top<0) top=0;
+    if (right>=320) right=319;
+    if (bottom>=320) bottom=319;
+    for (int row=top/CHART_DIRTY_CELL;row<=bottom/CHART_DIRTY_CELL;++row)
+        for (int col=left/CHART_DIRTY_CELL;col<=right/CHART_DIRTY_CELL;++col) {
+            unsigned bit=(unsigned)(row*CHART_DIRTY_COLS+col);
+            dirty_target->bits[bit/8]|=(uint8_t)(1U<<(bit%8));
+        }
+}
 
 static void set_tile(uint16_t *buffer,int x,int y,int width,int rows)
 {
@@ -35,6 +50,7 @@ static uint16_t pack(color_t c)
 
 static void pixel(int x, int y, color_t c, unsigned alpha)
 {
+    if (dirty_target) { if (alpha) dirty_bounds(x,y,x,y); return; }
     if (x < tile_x || x >= tile_x + tile_width || y < tile_y || y >= tile_y + tile_rows) return;
     uint16_t *p = &tile[(y-tile_y)*tile_width+(x-tile_x)];
     if (alpha >= 15) { *p = pack(c); return; }
@@ -47,6 +63,11 @@ static void pixel(int x, int y, color_t c, unsigned alpha)
 
 static void disc(float x, float y, float radius, color_t c)
 {
+    if (dirty_target) {
+        dirty_bounds((int)floorf(x-radius-1),(int)floorf(y-radius-1),
+                     (int)ceilf(x+radius+1),(int)ceilf(y+radius+1));
+        return;
+    }
     if (x+radius+1 < tile_x || x-radius-1 >= tile_x+tile_width ||
         y+radius+1 < tile_y || y-radius-1 >= tile_y+tile_rows) return;
     /* The LUT bounds the radius; clamp rather than read past it. */
@@ -71,6 +92,12 @@ static void disc(float x, float y, float radius, color_t c)
 
 static void line(float x1, float y1, float x2, float y2, float width, color_t c)
 {
+    if (dirty_target) {
+        float padding=width*0.5f+1;
+        dirty_bounds((int)floorf(fminf(x1,x2)-padding),(int)floorf(fminf(y1,y2)-padding),
+                     (int)ceilf(fmaxf(x1,x2)+padding),(int)ceilf(fmaxf(y1,y2)+padding));
+        return;
+    }
     if (fmaxf(x1,x2)+width < tile_x || fminf(x1,x2)-width >= tile_x+tile_width ||
         fmaxf(y1,y2)+width < tile_y || fminf(y1,y2)-width >= tile_y+tile_rows) return;
     float dx=x2-x1, dy=y2-y1;
@@ -184,6 +211,11 @@ static void text_limited(const char *s, int x, int y, int size, color_t c, int l
         }
         /* Glyph rows are trimmed to inked extent; `top` restores the shared baseline. */
         int top=y+g->top;
+        if (dirty_target) {
+            dirty_bounds(x,top,x+g->width-1,top+g->height-1);
+            x+=g->width;
+            continue;
+        }
         if (x+g->width>tile_x && x<tile_x+tile_width &&
             top+g->height>tile_y && top<tile_y+tile_rows) {
             int from_x=tile_x>x ? tile_x-x : 0,from_y=tile_y>top ? tile_y-top : 0;
@@ -281,59 +313,94 @@ static float bin_width(const chart_bin_t *b,int64_t now)
     return width;
 }
 
-void chart_render_rect(const chart_model_t *m,int64_t now,int x,int y,int width,int rows,uint16_t *buffer)
+enum {
+    ELEMENT_PEAK=CHART_BINS, ELEMENT_NAME, ELEMENT_FREQUENCY, ELEMENT_RSSI,
+    ELEMENT_SIM, ELEMENT_ANGLE, ELEMENT_TREND, ELEMENT_COVERAGE, ELEMENT_STATUS,
+    ELEMENT_STATIC, ELEMENT_COUNT
+};
+#define ELEMENT(bit) (UINT64_C(1)<<(bit))
+
+static bool stale_signal(const chart_model_t *m,int64_t now)
 {
-    if (x<0 || x>=320 || y<0 || y>=320 || width<=0 || width>320-x || rows<=0 || rows>320-y) return;
-    set_tile(buffer,x,y,width,rows);
-    for (int j=0; j<width*rows; ++j) tile[j]=pack(bg);
-    /* Inner grid rings scale with the outer ring: 0.26 and 0.47 and 0.68 of R. */
-    for (int r=29;r<=86;r+=r==29 ? 28 : 29)
-        for (int a=0;a<360;a+=8) arc(a,a+3,r,0.8f,grid);
-    line(CHART_CENTER_X-CHART_OUTER_R+6,CHART_CENTER_Y,
-         CHART_CENTER_X+CHART_OUTER_R-6,CHART_CENTER_Y,0.7f,grid);
-    line(CHART_CENTER_X,CHART_CENTER_Y-CHART_OUTER_R+6,
-         CHART_CENTER_X,CHART_CENTER_Y+CHART_OUTER_R-6,0.7f,grid);
-    arc(0,360,CHART_OUTER_R,0.9f,mix(grid,muted,0.25f));
-    for (int a=0;a<360;a+=10) {
-        float x1,y1,x2,y2;
-        polar(a,CHART_OUTER_R-2,&x1,&y1);
-        polar(a,a%30 ? CHART_OUTER_R+1 : CHART_OUTER_R+4,&x2,&y2);
-        line(x1,y1,x2,y2,0.9f,mix(grid,muted,0.35f));
-    }
-    /* Fixed antenna cone: a solid wedge fading outward, not a radar sweep. */
-    {
-        const float half_angle=11.0f, reach=CHART_SAMPLE_R-6.0f;
-        int top=CHART_CENTER_Y-(int)reach-1;
-        if (top<tile_y) top=tile_y;
-        int bottom=CHART_CENTER_Y;
-        if (bottom>=tile_y+tile_rows) bottom=tile_y+tile_rows-1;
-        const float slope=tanf(half_angle*3.14159265f/180.0f);
-        for (int py=top;py<=bottom;++py) {
-            float dy=(float)(CHART_CENTER_Y-py);
-            if (dy<0 || dy>reach) continue;
-            float spread=dy*slope;
-            /* Fade with distance so the wedge reads as emission, not a filled triangle. */
-            float strength=1.0f-dy/reach;
-            strength*=strength;
-            int from=(int)floorf(CHART_CENTER_X-spread)-1,to=(int)ceilf(CHART_CENTER_X+spread)+1;
-            if (from<tile_x) from=tile_x;
-            if (to>=tile_x+tile_width) to=tile_x+tile_width-1;
-            for (int px=from;px<=to;++px) {
-                float dx=fabsf((float)px-CHART_CENTER_X);
-                /* Soften both the outer edge and the centre so no hard step shows. */
-                float edge=fminf(1.0f,fmaxf(0.0f,spread+0.5f-dx));
-                float alpha=15.0f*0.42f*strength*edge;
-                unsigned a=(unsigned)(alpha+0.5f);
-                if (a) pixel(px,py,cyan,a>15 ? 15 : a);
+    return !m->last_signal_us || now-m->last_signal_us>CHART_SIGNAL_TIMEOUT_US;
+}
+
+static int display_angle(const chart_model_t *m)
+{
+    int angle=(int)lroundf(chart_wrap180(m->heading));
+    return angle==180 ? -180 : angle;
+}
+
+static const char *display_status(const chart_model_t *m,int64_t now)
+{
+    if (m->pose_status==CHART_IMU_ERROR) return "IMU 错误";
+    if (m->pose_status==CHART_CALIBRATING) return "静置校准";
+    if (m->tilt_deg>CHART_TILT_DEG) return "保持水平";
+    if (m->target_status==CHART_WIFI_ERROR) return "Wi-Fi 错误";
+    if (m->target_status==CHART_TARGET_MISSING) return "未发现信号";
+    if (stale_signal(m,now) || m->target_status==CHART_TARGET_SEARCH) return "等待信号";
+    return "慢速转动设备";
+}
+
+static float bin_span(const chart_model_t *m,int i)
+{
+    const chart_bin_t *b=&m->bins[i],*next=&m->bins[(i+1)%CHART_BINS];
+    float span=next->count ? chart_wrap180(next->heading-b->heading) : 0;
+    return span<0 || span>20 ? 0 : span;
+}
+
+static void render_scene(const chart_model_t *m,int64_t now,uint64_t elements)
+{
+    if (elements&ELEMENT(ELEMENT_STATIC)) {
+        /* Inner grid rings scale with the outer ring: 0.26 and 0.47 and 0.68 of R. */
+        for (int r=29;r<=86;r+=r==29 ? 28 : 29)
+            for (int a=0;a<360;a+=8) arc(a,a+3,r,0.8f,grid);
+        line(CHART_CENTER_X-CHART_OUTER_R+6,CHART_CENTER_Y,
+             CHART_CENTER_X+CHART_OUTER_R-6,CHART_CENTER_Y,0.7f,grid);
+        line(CHART_CENTER_X,CHART_CENTER_Y-CHART_OUTER_R+6,
+             CHART_CENTER_X,CHART_CENTER_Y+CHART_OUTER_R-6,0.7f,grid);
+        arc(0,360,CHART_OUTER_R,0.9f,mix(grid,muted,0.25f));
+        for (int a=0;a<360;a+=10) {
+            float x1,y1,x2,y2;
+            polar(a,CHART_OUTER_R-2,&x1,&y1);
+            polar(a,a%30 ? CHART_OUTER_R+1 : CHART_OUTER_R+4,&x2,&y2);
+            line(x1,y1,x2,y2,0.9f,mix(grid,muted,0.35f));
+        }
+        /* Fixed antenna cone: a solid wedge fading outward, not a radar sweep. */
+        {
+            const float half_angle=11.0f, reach=CHART_SAMPLE_R-6.0f;
+            int top=CHART_CENTER_Y-(int)reach-1;
+            if (top<tile_y) top=tile_y;
+            int bottom=CHART_CENTER_Y;
+            if (bottom>=tile_y+tile_rows) bottom=tile_y+tile_rows-1;
+            const float slope=tanf(half_angle*3.14159265f/180.0f);
+            for (int py=top;py<=bottom;++py) {
+                float dy=(float)(CHART_CENTER_Y-py);
+                if (dy<0 || dy>reach) continue;
+                float spread=dy*slope;
+                /* Fade with distance so the wedge reads as emission, not a filled triangle. */
+                float strength=1.0f-dy/reach;
+                strength*=strength;
+                int from=(int)floorf(CHART_CENTER_X-spread)-1,to=(int)ceilf(CHART_CENTER_X+spread)+1;
+                if (from<tile_x) from=tile_x;
+                if (to>=tile_x+tile_width) to=tile_x+tile_width-1;
+                for (int px=from;px<=to;++px) {
+                    float dx=fabsf((float)px-CHART_CENTER_X);
+                    /* Soften both the outer edge and the centre so no hard step shows. */
+                    float edge=fminf(1.0f,fmaxf(0.0f,spread+0.5f-dx));
+                    float alpha=15.0f*0.42f*strength*edge;
+                    unsigned a=(unsigned)(alpha+0.5f);
+                    if (a) pixel(px,py,cyan,a>15 ? 15 : a);
+                }
             }
         }
     }
     for (int i=0;i<CHART_BINS;++i) {
+        if (!(elements&ELEMENT(i))) continue;
         const chart_bin_t *b=&m->bins[i],*next=&m->bins[(i+1)%CHART_BINS];
         if (!b->count) continue;
         float angle=chart_wrap180(b->heading-m->display_heading);
-        float span=next->count ? chart_wrap180(next->heading-b->heading) : 0;
-        if (span<0 || span>20) span=0;
+        float span=bin_span(m,i);
         if (!arc_in_tile(angle,angle+span,CHART_SAMPLE_R,9)) continue;
         color_t c=bin_color(b,now);
         float width=bin_width(b,now);
@@ -354,7 +421,7 @@ void chart_render_rect(const chart_model_t *m,int64_t now,int x,int y,int width,
         float px,py; polar(angle,CHART_SAMPLE_R,&px,&py);
         disc(px,py,now-b->updated_us<=CHART_FRESH_US ? 1.8f : 0.9f,c);
     }
-    if (m->peak_bin>=0) {
+    if ((elements&ELEMENT(ELEMENT_PEAK)) && m->peak_bin>=0) {
         const chart_bin_t *b=&m->bins[m->peak_bin];
         float a=chart_wrap180(b->heading-m->display_heading);
         color_t c=now-b->updated_us>CHART_DARK_US ? history : amber;
@@ -362,78 +429,159 @@ void chart_render_rect(const chart_model_t *m,int64_t now,int x,int y,int width,
         arc(a-6,a+6,CHART_SAMPLE_R,7,c);
         float px,py; polar(a,CHART_SAMPLE_R,&px,&py); disc(px,py,2.6f,mix(c,white,0.5f));
     }
-    /* Antenna marker sits just outside the sample ring, straddling the outer ring. */
-    line(CHART_CENTER_X,CHART_CENTER_Y,CHART_CENTER_X,CHART_CENTER_Y-CHART_SAMPLE_R-4,1,cyan);
-    /* Origin reads as a ring with a dark core, matching the design's hollow hub. */
-    disc(CHART_CENTER_X,CHART_CENTER_Y,4.5f,cyan);
-    disc(CHART_CENTER_X,CHART_CENTER_Y,2.2f,bg);
-    for (int py=CHART_CENTER_Y-CHART_OUTER_R-10;py<=CHART_CENTER_Y-CHART_OUTER_R+1;++py) {
-        int half=(py-(CHART_CENTER_Y-CHART_OUTER_R-10))/2;
-        for (int px=CHART_CENTER_X-half;px<=CHART_CENTER_X+half;++px) pixel(px,py,cyan,15);
+    if (elements&ELEMENT(ELEMENT_STATIC)) {
+        /* Antenna marker sits just outside the sample ring, straddling the outer ring. */
+        line(CHART_CENTER_X,CHART_CENTER_Y,CHART_CENTER_X,CHART_CENTER_Y-CHART_SAMPLE_R-4,1,cyan);
+        /* Origin reads as a ring with a dark core, matching the design's hollow hub. */
+        disc(CHART_CENTER_X,CHART_CENTER_Y,4.5f,cyan);
+        disc(CHART_CENTER_X,CHART_CENTER_Y,2.2f,bg);
+        for (int py=CHART_CENTER_Y-CHART_OUTER_R-10;py<=CHART_CENTER_Y-CHART_OUTER_R+1;++py) {
+            int half=(py-(CHART_CENTER_Y-CHART_OUTER_R-10))/2;
+            for (int px=CHART_CENTER_X-half;px<=CHART_CENTER_X+half;++px) pixel(px,py,cyan,15);
+        }
     }
     /* Name must stop clear of the centred 天线 marker, whatever that label measures. */
     int antenna_left=CHART_CENTER_X-text_width("天线",CHART_FONT_LABEL)/2;
-    text_limited(m->source[0] ? m->source : "--",12,8,CHART_FONT_NAME,white,antenna_left-8,true);
+    if (elements&ELEMENT(ELEMENT_NAME))
+        text_limited(m->source[0] ? m->source : "--",12,8,CHART_FONT_NAME,white,antenna_left-8,true);
     char label[64];
     if (m->frequency_mhz) snprintf(label,sizeof(label),"%d MHz",m->frequency_mhz);
     else snprintf(label,sizeof(label),"-- MHz");
-    text(label,12,32,CHART_FONT_FREQ,muted,132);
-    bool stale=!m->last_signal_us || now-m->last_signal_us>CHART_SIGNAL_TIMEOUT_US;
+    if (elements&ELEMENT(ELEMENT_FREQUENCY)) text(label,12,32,CHART_FONT_FREQ,muted,132);
+    bool stale=stale_signal(m,now);
     if (m->last_signal_us) snprintf(label,sizeof(label),"%d",(int)lroundf(m->current_rssi));
     else snprintf(label,sizeof(label),"--");
-    text(label,278-text_width(label,CHART_FONT_RSSI),4,CHART_FONT_RSSI,stale ? history : cyan,278);
-    /* dBm sits on the reading's baseline, not its box. */
-    text("dBm",281,4+ink_bottom(CHART_FONT_RSSI)-ink_bottom(CHART_FONT_LABEL),
-         CHART_FONT_LABEL,muted,319);
-    if (m->mode!=LIVE_WIFI) text("模拟",12,54,CHART_FONT_LABEL,amber,80);
-    centered("天线",4,CHART_FONT_LABEL,cyan);
-    text("-90°",10,CHART_CENTER_Y-11,CHART_FONT_TICK,muted,48);
-    text("+90°",272,CHART_CENTER_Y-11,CHART_FONT_TICK,muted,319);
-    int angle=(int)lroundf(chart_wrap180(m->heading));
-    if (angle==180) angle=-180;
-    snprintf(label,sizeof(label),"%+04d°",angle);
-    /* Turn angle stays inside the dial; the prefix centres on the number's ink. */
-    int w=text_width("转角 ",CHART_FONT_TURN)+text_width(label,CHART_FONT_ANGLE);
-    int left=CHART_CENTER_X-w/2;
-    text("转角 ",left,206+ink_centre(CHART_FONT_ANGLE)-ink_centre(CHART_FONT_TURN),
-         CHART_FONT_TURN,muted,320);
-    text(label,left+text_width("转角 ",CHART_FONT_TURN),206,CHART_FONT_ANGLE,cyan,320);
-    /* Trend sparkline: clipped left so it never touches the dial's tick ring. */
-    const float trend_right=306.0f, trend_base=57.0f, trend_height=12.0f;
-    /* At the sparkline's lowest row the ring reaches furthest right; clear it there. */
-    float ring_dy=(float)(CHART_CENTER_Y-trend_base);
-    float ring_edge=(float)CHART_OUTER_R+4;
-    float ring_x=ring_dy<ring_edge
-        ? CHART_CENTER_X+sqrtf(ring_edge*ring_edge-ring_dy*ring_dy) : (float)CHART_CENTER_X;
-    const float trend_left=ring_x+5;
-    unsigned first=(m->trend_next+CHART_TREND_LENGTH-m->trend_used)%CHART_TREND_LENGTH;
-    for (unsigned i=1;i<m->trend_used;++i) {
-        chart_signal_event_t a=m->trend[(first+i-1)%CHART_TREND_LENGTH];
-        chart_signal_event_t b=m->trend[(first+i)%CHART_TREND_LENGTH];
-        if (b.time_us-a.time_us>350000) continue;
-        float x1=trend_right-(now-a.time_us)/50000.0f, x2=trend_right-(now-b.time_us)/50000.0f;
-        if (x2<trend_left) continue; /* Older than the window; already scrolled out. */
-        float v1=fmaxf(0,fminf(1,(a.rssi-CHART_RSSI_MIN)/(CHART_RSSI_MAX-CHART_RSSI_MIN)));
-        float v2=fmaxf(0,fminf(1,(b.rssi-CHART_RSSI_MIN)/(CHART_RSSI_MAX-CHART_RSSI_MIN)));
-        float y1=trend_base-v1*trend_height,y2=trend_base-v2*trend_height;
-        if (x1<trend_left) { /* Trim the entering segment instead of dropping it. */
-            y1+=(y2-y1)*(trend_left-x1)/(x2-x1);
-            x1=trend_left;
+    if (elements&ELEMENT(ELEMENT_RSSI))
+        text(label,278-text_width(label,CHART_FONT_RSSI),4,CHART_FONT_RSSI,stale ? history : cyan,278);
+    if (elements&ELEMENT(ELEMENT_STATIC)) {
+        /* dBm sits on the reading's baseline, not its box. */
+        text("dBm",281,4+ink_bottom(CHART_FONT_RSSI)-ink_bottom(CHART_FONT_LABEL),
+             CHART_FONT_LABEL,muted,319);
+        centered("天线",4,CHART_FONT_LABEL,cyan);
+        text("-90°",10,CHART_CENTER_Y-11,CHART_FONT_TICK,muted,48);
+        text("+90°",272,CHART_CENTER_Y-11,CHART_FONT_TICK,muted,319);
+    }
+    if ((elements&ELEMENT(ELEMENT_SIM)) && m->mode!=LIVE_WIFI)
+        text("模拟",12,54,CHART_FONT_LABEL,amber,80);
+    if (elements&ELEMENT(ELEMENT_ANGLE)) {
+        int angle=display_angle(m);
+        snprintf(label,sizeof(label),"%+04d°",angle);
+        /* Turn angle stays inside the dial; the prefix centres on the number's ink. */
+        int w=text_width("转角 ",CHART_FONT_TURN)+text_width(label,CHART_FONT_ANGLE);
+        int left=CHART_CENTER_X-w/2;
+        text("转角 ",left,206+ink_centre(CHART_FONT_ANGLE)-ink_centre(CHART_FONT_TURN),
+             CHART_FONT_TURN,muted,320);
+        text(label,left+text_width("转角 ",CHART_FONT_TURN),206,CHART_FONT_ANGLE,cyan,320);
+    }
+    if (elements&ELEMENT(ELEMENT_TREND)) {
+        /* Trend sparkline: clipped left so it never touches the dial's tick ring. */
+        const float trend_right=306.0f, trend_base=57.0f, trend_height=12.0f;
+        /* At the sparkline's lowest row the ring reaches furthest right; clear it there. */
+        float ring_dy=(float)(CHART_CENTER_Y-trend_base);
+        float ring_edge=(float)CHART_OUTER_R+4;
+        float ring_x=ring_dy<ring_edge
+            ? CHART_CENTER_X+sqrtf(ring_edge*ring_edge-ring_dy*ring_dy) : (float)CHART_CENTER_X;
+        const float trend_left=ring_x+5;
+        unsigned first=(m->trend_next+CHART_TREND_LENGTH-m->trend_used)%CHART_TREND_LENGTH;
+        for (unsigned i=1;i<m->trend_used;++i) {
+            chart_signal_event_t a=m->trend[(first+i-1)%CHART_TREND_LENGTH];
+            chart_signal_event_t b=m->trend[(first+i)%CHART_TREND_LENGTH];
+            if (b.time_us-a.time_us>350000) continue;
+            float x1=trend_right-(now-a.time_us)/50000.0f, x2=trend_right-(now-b.time_us)/50000.0f;
+            if (x2<trend_left) continue; /* Older than the window; already scrolled out. */
+            float v1=fmaxf(0,fminf(1,(a.rssi-CHART_RSSI_MIN)/(CHART_RSSI_MAX-CHART_RSSI_MIN)));
+            float v2=fmaxf(0,fminf(1,(b.rssi-CHART_RSSI_MIN)/(CHART_RSSI_MAX-CHART_RSSI_MIN)));
+            float y1=trend_base-v1*trend_height,y2=trend_base-v2*trend_height;
+            if (x1<trend_left) { /* Trim the entering segment instead of dropping it. */
+                y1+=(y2-y1)*(trend_left-x1)/(x2-x1);
+                x1=trend_left;
+            }
+            line(x1,y1,x2,y2,1,stale ? history : dark);
         }
-        line(x1,y1,x2,y2,1,stale ? history : dark);
     }
     /* Bottom: `180°` clears the ticks, the coverage bar sits between the two lines. */
-    centered("180°",276,CHART_FONT_TICK,muted);
-    line(67,295,253,295,3,grid);
-    if (m->coverage) line(67,295,67+186.0f*m->coverage/CHART_BINS,295,3,cyan);
-    const char *status="慢速转动设备";
-    if (m->pose_status==CHART_IMU_ERROR) status="IMU 错误";
-    else if (m->pose_status==CHART_CALIBRATING) status="静置校准";
-    else if (m->tilt_deg>CHART_TILT_DEG) status="保持水平";
-    else if (m->target_status==CHART_WIFI_ERROR) status="Wi-Fi 错误";
-    else if (m->target_status==CHART_TARGET_MISSING) status="未发现信号";
-    else if (stale || m->target_status==CHART_TARGET_SEARCH) status="等待信号";
-    centered(status,297,CHART_FONT_STATUS,muted);
+    if (elements&ELEMENT(ELEMENT_STATIC)) {
+        centered("180°",276,CHART_FONT_TICK,muted);
+        line(67,295,253,295,3,grid);
+    }
+    if ((elements&ELEMENT(ELEMENT_COVERAGE)) && m->coverage)
+        line(67,295,67+186.0f*m->coverage/CHART_BINS,295,3,cyan);
+    if (elements&ELEMENT(ELEMENT_STATUS)) centered(display_status(m,now),297,CHART_FONT_STATUS,muted);
+}
+
+void chart_render_rect(const chart_model_t *m,int64_t now,int x,int y,int width,int rows,uint16_t *buffer)
+{
+    if (x<0 || x>=320 || y<0 || y>=320 || width<=0 || width>320-x || rows<=0 || rows>320-y) return;
+    set_tile(buffer,x,y,width,rows);
+    for (int j=0;j<width*rows;++j) tile[j]=pack(bg);
+    render_scene(m,now,(ELEMENT(ELEMENT_COUNT)-1));
+}
+
+static bool same_color(color_t a,color_t b)
+{
+    return a.r==b.r && a.g==b.g && a.b==b.b;
+}
+
+static bool same_bin_style(const chart_bin_t *a,int64_t at,const chart_bin_t *b,int64_t bt)
+{
+    return same_color(bin_color(a,at),bin_color(b,bt)) && bin_width(a,at)==bin_width(b,bt);
+}
+
+void chart_mark_dirty(const chart_model_t *previous,int64_t previous_time,
+                      const chart_model_t *current,int64_t current_time,chart_dirty_mask_t *mask)
+{
+    memset(mask,0,sizeof(*mask));
+    if (!previous || previous->mode!=current->mode || previous->epoch_us!=current->epoch_us) {
+        memset(mask->bits,255,sizeof(mask->bits));
+        return;
+    }
+    uint64_t changed=0;
+    for (int i=0;i<CHART_BINS;++i) {
+        const chart_bin_t *a=&previous->bins[i],*b=&current->bins[i];
+        if (!a->count && !b->count) continue;
+        float sa=bin_span(previous,i),sb=bin_span(current,i);
+        bool equal=(a->count!=0)==(b->count!=0) &&
+            chart_wrap180(a->heading-previous->display_heading)==chart_wrap180(b->heading-current->display_heading) &&
+            sa==sb && same_bin_style(a,previous_time,b,current_time) &&
+            (previous_time-a->updated_us<=CHART_FRESH_US)==(current_time-b->updated_us<=CHART_FRESH_US);
+        if (equal && sa>0)
+            equal=same_bin_style(&previous->bins[(i+1)%CHART_BINS],previous_time,
+                                 &current->bins[(i+1)%CHART_BINS],current_time);
+        if (!equal) changed|=ELEMENT(i);
+    }
+    if (previous->peak_bin!=current->peak_bin) changed|=ELEMENT(ELEMENT_PEAK);
+    else if (current->peak_bin>=0) {
+        const chart_bin_t *a=&previous->bins[previous->peak_bin],*b=&current->bins[current->peak_bin];
+        if (chart_wrap180(a->heading-previous->display_heading)!=chart_wrap180(b->heading-current->display_heading) ||
+            (previous_time-a->updated_us>CHART_DARK_US)!=(current_time-b->updated_us>CHART_DARK_US))
+            changed|=ELEMENT(ELEMENT_PEAK);
+    }
+    if (strcmp(previous->source,current->source)) changed|=ELEMENT(ELEMENT_NAME);
+    if (previous->frequency_mhz!=current->frequency_mhz) changed|=ELEMENT(ELEMENT_FREQUENCY);
+    bool stale_before=stale_signal(previous,previous_time),stale_now=stale_signal(current,current_time);
+    if ((previous->last_signal_us!=0)!=(current->last_signal_us!=0) || stale_before!=stale_now ||
+        (current->last_signal_us && lroundf(previous->current_rssi)!=lroundf(current->current_rssi)))
+        changed|=ELEMENT(ELEMENT_RSSI);
+    if (display_angle(previous)!=display_angle(current)) changed|=ELEMENT(ELEMENT_ANGLE);
+    if (previous->coverage!=current->coverage) changed|=ELEMENT(ELEMENT_COVERAGE);
+    if (strcmp(display_status(previous,previous_time),display_status(current,current_time)))
+        changed|=ELEMENT(ELEMENT_STATUS);
+    bool trend_changed=previous_time!=current_time || stale_before!=stale_now || previous->trend_used!=current->trend_used;
+    unsigned old_first=(previous->trend_next+CHART_TREND_LENGTH-previous->trend_used)%CHART_TREND_LENGTH;
+    unsigned new_first=(current->trend_next+CHART_TREND_LENGTH-current->trend_used)%CHART_TREND_LENGTH;
+    for (unsigned i=0;!trend_changed && i<current->trend_used;++i) {
+        const chart_signal_event_t *a=&previous->trend[(old_first+i)%CHART_TREND_LENGTH];
+        const chart_signal_event_t *b=&current->trend[(new_first+i)%CHART_TREND_LENGTH];
+        trend_changed=a->time_us!=b->time_us || a->rssi!=b->rssi;
+    }
+    if (trend_changed) changed|=ELEMENT(ELEMENT_TREND);
+    if (!changed) return;
+    /* Traverse only changed elements, using the same polar, stroke and glyph paths. */
+    set_tile(NULL,0,0,320,320);
+    dirty_target=mask;
+    render_scene(previous,previous_time,changed);
+    render_scene(current,current_time,changed);
+    dirty_target=NULL;
 }
 
 void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_t *buffer)
@@ -441,7 +589,8 @@ void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_
     chart_render_rect(m,now,0,y,320,rows,buffer);
 }
 
-/* Temporary 80 MHz colour experiment; removed with the demo in P5. Amber is the
+#if CHART_LCD_SHIFT_DIAGNOSTIC
+/* Temporary 80 MHz colour experiment; retained behind a compile switch. Amber is the
  * only palette colour with a saturated red channel and live G/B bits, so the
  * cyan/white/muted/grid neighbours act as its controls. */
 static const color_t *diag_swatch(int index)
@@ -476,12 +625,12 @@ static void raw_pixel(int x,int y,uint16_t word)
 /* Bit ruler: block k carries only bit k, so a stream shifted by n bits shows
  * the pattern slid n blocks left. Reading it needs counting, not colour
  * judgement, which a camera's white balance cannot distort. */
-void chart_render_diag_ruler(int y,int rows,uint16_t *buffer)
+void chart_render_diag_ruler(int x,int y,int width,int rows,uint16_t *buffer)
 {
-    if (y<0 || y>=320 || rows<=0 || rows>320-y) return;
+    if (x<0 || y<0 || width<=0 || width>320-x || rows<=0 || rows>320-y) return;
     const int top=CHART_DIAG_RULER_Y,bottom=top+CHART_DIAG_RULER_ROWS;
     if (y>=bottom || y+rows<=top) return;
-    set_tile(buffer,0,y,320,rows);
+    set_tile(buffer,x,y,width,rows);
     int from=y>top ? y : top,to=y+rows<bottom ? y+rows : bottom;
     for (int py=from;py<to;++py)
         for (int i=0;i<16;++i) {
@@ -495,12 +644,12 @@ void chart_render_diag_ruler(int y,int rows,uint16_t *buffer)
 }
 
 /* Overlays the swatch band onto whichever tile covers it; other rows untouched. */
-void chart_render_diag_swatches(int y,int rows,uint16_t *buffer,const char *label)
+void chart_render_diag_swatches(int x,int y,int width,int rows,uint16_t *buffer,const char *label)
 {
-    if (y<0 || y>=320 || rows<=0 || rows>320-y) return;
+    if (x<0 || y<0 || width<=0 || width>320-x || rows<=0 || rows>320-y) return;
     const int top=CHART_DIAG_SWATCH_Y,bottom=top+CHART_DIAG_SWATCH_ROWS;
     if (y>=bottom || y+rows<=top) return;
-    set_tile(buffer,0,y,320,rows);
+    set_tile(buffer,x,y,width,rows);
     int from=y>top ? y : top,to=y+rows<bottom ? y+rows : bottom;
     for (int py=from;py<to;++py) {
         for (int i=0;i<CHART_DIAG_SWATCHES;++i) {
@@ -515,6 +664,7 @@ void chart_render_diag_swatches(int y,int rows,uint16_t *buffer,const char *labe
                     top+CHART_DIAG_SWATCH_ROWS-2-ink_bottom(CHART_FONT_TICK),
                     CHART_FONT_TICK,white,320);
 }
+#endif /* CHART_LCD_SHIFT_DIAGNOSTIC */
 
 void chart_render_test_tile(int y,int rows,uint16_t *buffer)
 {
@@ -531,87 +681,3 @@ void chart_render_test_tile(int y,int rows,uint16_t *buffer)
     centered("天线",174,14,cyan);
 }
 
-void chart_render_test_overlay(int y,int rows,uint16_t *buffer,const char *label,unsigned frame)
-{
-    set_tile(buffer,0,y,320,rows);
-    for (int py=y<299 ? 299 : y;py<y+rows;++py)
-        for (int x=0;x<320;++x) pixel(x,py,bg,15);
-    int x=(frame*6)%318;
-    for (int dx=0;dx<3;++dx) pixel(x+dx,299,cyan,15);
-    centered(label,302,14,cyan);
-}
-
-void chart_render_refresh_tile(int y,int rows,uint16_t *buffer,const char *strategy,
-                              float fps,int64_t elapsed_us,unsigned frame)
-{
-    set_tile(buffer,0,y,320,rows);
-    color_t black={0,0,0}, light={220,220,220};
-    color_t colors[]={{255,0,0},{0,255,0},{0,0,255},{255,255,255}};
-    int position=(int)((elapsed_us/6250)%320); /* Same 160 px/s motion in every strategy. */
-    for (int py=y;py<y+rows;++py) {
-        int group=(py-CHART_LCD_REFRESH_Y)/64;
-        int local=(py-CHART_LCD_REFRESH_Y)%64;
-        int bar=group ? (160-position+320)%320 : position;
-        for (int x=0;x<320;++x) {
-            color_t c=black;
-            if (py>=CHART_LCD_REFRESH_Y && py<CHART_LCD_REFRESH_Y+CHART_LCD_REFRESH_HEIGHT) {
-                c=colors[local/16];
-                if ((x-bar+320)%320<24) c=black;
-                if (x>=288 && local>=16 && local<48) c=(frame+group)%2 ? light : black;
-            }
-            if (x==0 || x==319 || py==0 || py==319) c=light;
-            pixel(x,py,c,15);
-        }
-    }
-    centered("LCD REFRESH",8,20,white);
-    centered(strategy,36,20,white);
-    char label[40];
-    snprintf(label,sizeof(label),"CMD %d MHz  RGB565",CHART_LCD_SPI_HZ/1000000);
-    centered(label,68,14,light);
-    snprintf(label,sizeof(label),"%.1f FPS",fps);
-    centered(label,240,20,white);
-    centered("320 x 128",288,14,light);
-}
-
-static uint16_t wire_word(uint16_t rgb565)
-{
-    uint8_t bytes[]={(uint8_t)(rgb565>>8),(uint8_t)rgb565};
-    uint16_t word;
-    memcpy(&word,bytes,sizeof(word));
-    return word;
-}
-
-static void refresh_band(int y,int rows,uint16_t *buffer,int64_t elapsed_us,unsigned frame,bool wire)
-{
-    uint16_t colors[]={0xf800,0x07e0,0x001f,0xffff};
-    uint16_t light=pack((color_t){220,220,220});
-    if (wire) {
-        for (unsigned i=0;i<sizeof(colors)/sizeof(*colors);++i) colors[i]=wire_word(colors[i]);
-        light=wire_word(light);
-    }
-    int position=(int)((elapsed_us/6250)%320);
-    for (int py=y;py<y+rows;++py) {
-        uint16_t *row=buffer+(py-y)*320;
-        if (py>y && py%16) { memcpy(row,row-320,320*sizeof(*row)); continue; }
-        int group=(py-CHART_LCD_REFRESH_Y)/64,local=(py-CHART_LCD_REFRESH_Y)%64;
-        int bar=group ? (160-position+320)%320 : position;
-        int end=bar+24<320 ? bar+24 : 320;
-        uint16_t color=colors[local/16];
-        for (int x=0;x<320;++x) row[x]=color;
-        for (int x=bar;x<end;++x) row[x]=0;
-        for (int x=0;x<bar+24-320;++x) row[x]=0;
-        if (local>=16 && local<48)
-            for (int x=288;x<320;++x) row[x]=(frame+group)%2 ? light : 0;
-        row[0]=row[319]=light;
-    }
-}
-
-void chart_render_refresh_band(int y,int rows,uint16_t *buffer,int64_t elapsed_us,unsigned frame)
-{
-    refresh_band(y,rows,buffer,elapsed_us,frame,false);
-}
-
-void chart_render_refresh_band_wire(int y,int rows,uint16_t *buffer,int64_t elapsed_us,unsigned frame)
-{
-    refresh_band(y,rows,buffer,elapsed_us,frame,true);
-}

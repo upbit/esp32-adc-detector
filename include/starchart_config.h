@@ -19,27 +19,29 @@
 #define CHART_LCD_BGR 1
 #define CHART_LCD_INVERT 1
 #define CHART_LCD_TEST_MS 5000 /* Hold the bright boot pattern for inspection. */
-#define CHART_LCD_TEST_ID 4 /* 0 restores the normal status footer. */
 #ifndef CHART_LCD_BOOT_DIAGNOSTIC
 #define CHART_LCD_BOOT_DIAGNOSTIC 0 /* 1 shows the colour/boundary check before the chart. */
 #endif
-#ifndef CHART_LCD_REFRESH_TEST
-#define CHART_LCD_REFRESH_TEST 1 /* 0 restores the existing star-chart tasks. */
-#endif
-#define CHART_LCD_REFRESH_ROWS 64 /* Benchmark maximum: 40960 bytes, not a full frame. */
 #define CHART_LCD_PIPE_ROWS 32 /* Maximum rows in each fixed DMA pixel region. */
 #define CHART_LCD_BUFFER_PIXELS (320 * CHART_LCD_PIPE_ROWS)
 #define CHART_LCD_BUFFER_BYTES (CHART_LCD_BUFFER_PIXELS * 2)
 #define CHART_LCD_PIXEL_BYTES (CHART_LCD_BUFFER_BYTES * 2) /* Two regions, 40 KiB total. */
-#define CHART_LCD_BUTTON 28 /* DevKitC-1 BOOT, active low. */
-#define CHART_LCD_BUTTON_DEBOUNCE_US 30000
-#define CHART_LCD_REFRESH_Y 96
-#define CHART_LCD_REFRESH_HEIGHT 128 /* Two independently animated 64-row bands. */
 #define CHART_TILE_ROWS 16
-/* Temporary 80 MHz colour-fidelity experiment; removed with the demo in P5.
- * Amber is the only palette entry with a saturated red channel and live G/B
- * bits, so it is the one colour that can expose low-bit loss on the wire.
- * The band deliberately covers the bottom status rows while experimenting. */
+/* At 80 MHz the panel latches one bit period late, so the pixel stream arrives
+ * rotated left by one bit (measured from photographs, 2026-10-15; 40 MHz needs
+ * none). Prepending this many dummy bits per block cancels it. The panel runs
+ * far outside the ST7796 66 ns write spec here, so the amount may drift with
+ * temperature, supply or panel batch -- re-check with the ruler below. */
+#ifndef CHART_LCD_SHIFT_BITS
+#define CHART_LCD_SHIFT_BITS 1
+#endif
+#ifndef CHART_LCD_SHIFT_DIAGNOSTIC
+#define CHART_LCD_SHIFT_DIAGNOSTIC 0 /* 1 overlays the bit ruler and swatches. */
+#endif
+#if CHART_LCD_SHIFT_DIAGNOSTIC
+/* Amber is the only palette entry with a saturated red channel and live G/B
+ * bits, so it is the one colour that exposes a shifted stream; the other four
+ * act as controls. The band covers the bottom status rows while diagnosing. */
 #define CHART_DIAG_SWATCH_Y 306
 #define CHART_DIAG_SWATCH_ROWS 14
 #define CHART_DIAG_SWATCH_W 48
@@ -50,11 +52,11 @@
 #define CHART_DIAG_RULER_ROWS 22
 #define CHART_DIAG_RULER_SCALE 5
 #define CHART_DIAG_RULER_W 20
+#endif
 #define CHART_DIRTY_CELL 16
 #define CHART_DIRTY_COLS (320 / CHART_DIRTY_CELL)
 #define CHART_DIRTY_ROWS (320 / CHART_DIRTY_CELL)
 #define CHART_DIRTY_BYTES ((CHART_DIRTY_COLS * CHART_DIRTY_ROWS) / 8)
-#define CHART_FPS 60 /* Above the full-frame bandwidth limit, for refresh testing. */
 
 /* Shared layout: the renderer and chart_screen_point must agree on the centre. */
 #define CHART_CENTER_X 160

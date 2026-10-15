@@ -163,13 +163,7 @@ static void render_tiles(void)
             assert(memcmp(frame+y*320,tile,sizeof(tile))==0);
         }
     }
-    uint16_t before[320*CHART_TILE_ROWS];
-    chart_render_tile(&model,clock_us,288,CHART_TILE_ROWS,tile);
-    memcpy(before,tile,sizeof(tile));
-    chart_render_test_overlay(288,CHART_TILE_ROWS,tile,"T02 40MHz 10.0FPS",0);
-    assert(memcmp(before,tile,11*320*sizeof(*tile))==0);
-    assert(tile[11*320]!=before[11*320]);
-    puts("PASS: full-circle/faded/fractional-angle tiled raster matches full frame; test footer stays in its band");
+    puts("PASS: full-circle/faded/fractional-angle tiled raster matches full frame");
 }
 
 static uint16_t rect_pixels[320*320+16];
@@ -258,7 +252,7 @@ static void render_rects(void)
         chart_render_rect(&model,clock_us,invalid[r].x,invalid[r].y,invalid[r].w,invalid[r].h,rect_pixels+8);
         for (unsigned i=0;i<sizeof(rect_pixels)/sizeof(*rect_pixels);++i) assert(rect_pixels[i]==0x5aa5);
     }
-    /* The diagnostic/overlay entries must restore their full-width context after a rect. */
+    /* The diagnostic entry must restore its full-width context after a rect. */
     chart_render_test_tile(96,CHART_TILE_ROWS,tile);
     memcpy(frame,tile,sizeof(tile));
     chart_render_rect(&model,clock_us,159,155,3,3,rect_pixels+8);
@@ -316,78 +310,6 @@ static void beacon_filter(void)
     puts("PASS: Beacon length/type/DS flags and transmitter+BSSID filtering");
 }
 
-static void refresh_pattern(void)
-{
-    static uint16_t block[320*CHART_LCD_REFRESH_ROWS],later[320*320];
-    static uint16_t wire[320*CHART_LCD_REFRESH_ROWS+2];
-    const int first=CHART_LCD_REFRESH_Y,end=first+CHART_LCD_REFRESH_HEIGHT;
-    chart_render_refresh_tile(0,320,frame,"10 WIRE 80M MAX",123.4f,0,0);
-    const int sizes[]={16,32,64};
-    for (unsigned s=0;s<sizeof(sizes)/sizeof(*sizes);++s) {
-        for (int y=0;y<320;y+=sizes[s]) {
-            int rows=320-y<sizes[s] ? 320-y : sizes[s];
-            chart_render_refresh_tile(y,rows,block,"10 WIRE 80M MAX",123.4f,0,0);
-            assert(memcmp(frame+y*320,block,rows*320*sizeof(*block))==0);
-        }
-    }
-    chart_render_refresh_tile(0,320,later,"10 WIRE 80M MAX",123.4f,1000000,1);
-    assert(memcmp(frame,later,first*320*sizeof(*frame))==0);
-    assert(memcmp(frame+end*320,later+end*320,(320-end)*320*sizeof(*frame))==0);
-    for (int group=0;group<2;++group) {
-        int y=first+group*64;
-        assert(memcmp(frame+y*320,later+y*320,64*320*sizeof(*frame))!=0);
-        assert(frame[y*320+80]==0xf800 && frame[(y+16)*320+80]==0x07e0);
-        assert(frame[(y+32)*320+80]==0x001f && frame[(y+48)*320+80]==0xffff);
-        assert(frame[(y+20)*320+300]!=later[(y+20)*320+300]);
-    }
-    assert(frame[first*320+8]==0 && later[first*320+168]==0);
-    assert(frame[(first+64)*320+168]==0 && later[(first+64)*320+8]==0);
-    for (int bar=0;bar<320;++bar) {
-        for (unsigned f=0;f<2;++f) {
-            chart_render_refresh_tile(first,CHART_LCD_REFRESH_HEIGHT,later,"10 WIRE 80M MAX",120,bar*6250LL,f);
-            for (int y=first;y<end;y+=64) {
-                chart_render_refresh_band(y,64,block,bar*6250LL,f);
-                assert(memcmp(later+(y-first)*320,block,64*320*sizeof(*block))==0);
-                wire[0]=wire[320*64+1]=0x5aa5;
-                chart_render_refresh_band_wire(y,64,wire+1,bar*6250LL,f);
-                const unsigned char *bytes=(const unsigned char *)(wire+1);
-                for (int i=0;i<320*64;++i) {
-                    assert(bytes[i*2]==(unsigned char)(block[i]>>8));
-                    assert(bytes[i*2+1]==(unsigned char)block[i]);
-                }
-                assert(wire[0]==0x5aa5 && wire[320*64+1]==0x5aa5);
-            }
-        }
-    }
-    for (int y=first;y<end;y+=7) {
-        int rows=end-y<7 ? end-y : 7;
-        chart_render_refresh_band(y,rows,block,319*6250LL,1);
-        chart_render_refresh_tile(y,rows,later,"10 WIRE 80M MAX",120,319*6250LL,1);
-        assert(memcmp(later,block,rows*320*sizeof(*block))==0);
-        wire[0]=wire[rows*320+1]=0x5aa5;
-        chart_render_refresh_band_wire(y,rows,wire+1,319*6250LL,1);
-        const unsigned char *bytes=(const unsigned char *)(wire+1);
-        for (int i=0;i<rows*320;++i) {
-            assert(bytes[i*2]==(unsigned char)(block[i]>>8));
-            assert(bytes[i*2+1]==(unsigned char)block[i]);
-        }
-        assert(wire[0]==0x5aa5 && wire[rows*320+1]==0x5aa5);
-    }
-    for (int y=first;y<end;++y) {
-        int rows=end-y<64 ? end-y : 64;
-        chart_render_refresh_band(y,rows,block,317*6250LL,1);
-        wire[0]=wire[rows*320+1]=0x5aa5;
-        chart_render_refresh_band_wire(y,rows,wire+1,317*6250LL,1);
-        const unsigned char *bytes=(const unsigned char *)(wire+1);
-        for (int i=0;i<rows*320;++i) {
-            assert(bytes[i*2]==(unsigned char)(block[i]>>8));
-            assert(bytes[i*2+1]==(unsigned char)block[i]);
-        }
-        assert(wire[0]==0x5aa5 && wire[rows*320+1]==0x5aa5);
-    }
-    puts("PASS: dual motion and guarded wire bytes match all positions, markers and offsets");
-}
-
 static void endurance(void)
 {
     chart_init(&model,UI_SIM,1000000);
@@ -406,7 +328,7 @@ static void endurance(void)
 
 int main(void)
 {
-    geometry(); buckets(); synchronization(); calibration(); boot_pattern(); rendering(); render_tiles(); render_rects(); glyph_coverage(); refresh_pattern(); beacon_filter(); endurance();
+    geometry(); buckets(); synchronization(); calibration(); boot_pattern(); rendering(); render_tiles(); render_rects(); glyph_coverage(); beacon_filter(); endurance();
     printf("All host tests passed. model=%zu bytes, tile=%zu bytes\n",sizeof(model),sizeof(tile));
     return 0;
 }
