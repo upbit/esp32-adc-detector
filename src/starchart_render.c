@@ -15,7 +15,12 @@ static float sine[720], cosine[720];
 #define CHART_DISTANCE_LUT ((CHART_DISC_MAX_R+1)*(CHART_DISC_MAX_R+1)*64)
 static uint16_t distance_lut[CHART_DISTANCE_LUT];
 static uint16_t *tile;
-static int tile_y, tile_rows;
+static int tile_x, tile_y, tile_width, tile_rows;
+
+static void set_tile(uint16_t *buffer,int x,int y,int width,int rows)
+{
+    tile=buffer; tile_x=x; tile_y=y; tile_width=width; tile_rows=rows;
+}
 
 static color_t mix(color_t a, color_t b, float t)
 {
@@ -30,8 +35,8 @@ static uint16_t pack(color_t c)
 
 static void pixel(int x, int y, color_t c, unsigned alpha)
 {
-    if ((unsigned)x >= 320 || y < tile_y || y >= tile_y + tile_rows) return;
-    uint16_t *p = &tile[(y-tile_y)*320+x];
+    if (x < tile_x || x >= tile_x + tile_width || y < tile_y || y >= tile_y + tile_rows) return;
+    uint16_t *p = &tile[(y-tile_y)*tile_width+(x-tile_x)];
     if (alpha >= 15) { *p = pack(c); return; }
     unsigned r=((*p >> 11) & 31)*255/31, g=((*p >> 5) & 63)*255/63, b=(*p & 31)*255/31;
     r=(r*(15-alpha)+c.r*alpha)/15;
@@ -42,14 +47,15 @@ static void pixel(int x, int y, color_t c, unsigned alpha)
 
 static void disc(float x, float y, float radius, color_t c)
 {
-    if (y+radius+1 < tile_y || y-radius-1 >= tile_y+tile_rows) return;
+    if (x+radius+1 < tile_x || x-radius-1 >= tile_x+tile_width ||
+        y+radius+1 < tile_y || y-radius-1 >= tile_y+tile_rows) return;
     /* The LUT bounds the radius; clamp rather than read past it. */
     if (radius>CHART_DISC_MAX_R) radius=CHART_DISC_MAX_R;
     int cx=(int)lroundf(x*64),cy=(int)lroundf(y*64),edge=(int)lroundf((radius+0.5f)*64);
     int left=(int)floorf(x-radius),right=(int)ceilf(x+radius);
     int top=(int)floorf(y-radius),bottom=(int)ceilf(y+radius);
-    if (left<0) left=0;
-    if (right>319) right=319;
+    if (left<tile_x) left=tile_x;
+    if (right>=tile_x+tile_width) right=tile_x+tile_width-1;
     if (top<tile_y) top=tile_y;
     if (bottom>=tile_y+tile_rows) bottom=tile_y+tile_rows-1;
     for (int py=top;py<=bottom;++py) {
@@ -65,11 +71,19 @@ static void disc(float x, float y, float radius, color_t c)
 
 static void line(float x1, float y1, float x2, float y2, float width, color_t c)
 {
-    if (fmaxf(y1,y2)+width < tile_y || fminf(y1,y2)-width >= tile_y+tile_rows) return;
+    if (fmaxf(x1,x2)+width < tile_x || fminf(x1,x2)-width >= tile_x+tile_width ||
+        fmaxf(y1,y2)+width < tile_y || fminf(y1,y2)-width >= tile_y+tile_rows) return;
     float dx=x2-x1, dy=y2-y1;
     int steps = (int)ceilf(fmaxf(fabsf(dx),fabsf(dy)));
     if (!steps) { disc(x1,y1,width*0.5f,c); return; }
     int first=0,last=steps;
+    /* Clip step indices, not endpoints: retain the full-frame disc centres and order. */
+    if (dx!=0) {
+        float a=(tile_x-width-1-x1)*steps/dx,b=(tile_x+tile_width+width+1-x1)*steps/dx;
+        if (a>b) { float swap=a; a=b; b=swap; }
+        if (a>first) first=(int)ceilf(a);
+        if (b<last) last=(int)floorf(b);
+    }
     if (dy!=0) {
         float a=(tile_y-width-1-y1)*steps/dy,b=(tile_y+tile_rows+width+1-y1)*steps/dy;
         if (a>b) { float swap=a; a=b; b=swap; }
@@ -90,16 +104,24 @@ static void polar(float angle, float radius, float *x, float *y)
 static bool arc_in_tile(float start,float end,float r,float padding)
 {
     if (end-start>=180)
-        return CHART_CENTER_Y+r+padding>=tile_y && CHART_CENTER_Y-r-padding<tile_y+tile_rows;
-    float x,y1,y2;
-    polar(start,r,&x,&y1); polar(end,r,&x,&y2);
+        return CHART_CENTER_X+r+padding>=tile_x && CHART_CENTER_X-r-padding<tile_x+tile_width &&
+               CHART_CENTER_Y+r+padding>=tile_y && CHART_CENTER_Y-r-padding<tile_y+tile_rows;
+    float x1,x2,y1,y2;
+    polar(start,r,&x1,&y1); polar(end,r,&x2,&y2);
+    float left=fminf(x1,x2),right=fmaxf(x1,x2);
     float top=fminf(y1,y2),bottom=fmaxf(y1,y2);
     int half=(int)floorf(start/180)+1;
     if (half*180.0f<=end) {
         if (half%2) bottom=CHART_CENTER_Y+r;
         else top=CHART_CENTER_Y-r;
     }
-    return bottom+padding>=tile_y && top-padding<tile_y+tile_rows;
+    half=(int)floorf((start-90)/180)+1;
+    if (90+half*180.0f<=end) {
+        if (half%2) left=CHART_CENTER_X-r;
+        else right=CHART_CENTER_X+r;
+    }
+    return right+padding>=tile_x && left-padding<tile_x+tile_width &&
+           bottom+padding>=tile_y && top-padding<tile_y+tile_rows;
 }
 
 static void arc(float start, float end, float r, float width, color_t c)
@@ -162,10 +184,14 @@ static void text_limited(const char *s, int x, int y, int size, color_t c, int l
         }
         /* Glyph rows are trimmed to inked extent; `top` restores the shared baseline. */
         int top=y+g->top;
-        if (top+g->height>=tile_y && top<tile_y+tile_rows) {
-            for (int py=0; py<g->height; ++py) {
-                if (top+py<tile_y || top+py>=tile_y+tile_rows) continue;
-                for (int px=0; px<g->width; ++px) {
+        if (x+g->width>tile_x && x<tile_x+tile_width &&
+            top+g->height>tile_y && top<tile_y+tile_rows) {
+            int from_x=tile_x>x ? tile_x-x : 0,from_y=tile_y>top ? tile_y-top : 0;
+            int to_x=tile_x+tile_width-x,to_y=tile_y+tile_rows-top;
+            if (to_x>g->width) to_x=g->width;
+            if (to_y>g->height) to_y=g->height;
+            for (int py=from_y; py<to_y; ++py) {
+                for (int px=from_x; px<to_x; ++px) {
                     unsigned pos=py*g->width+px;
                     unsigned v=chart_font_data[g->offset+pos/2];
                     unsigned a=pos%2 ? v&15 : v>>4;
@@ -255,10 +281,11 @@ static float bin_width(const chart_bin_t *b,int64_t now)
     return width;
 }
 
-void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_t *buffer)
+void chart_render_rect(const chart_model_t *m,int64_t now,int x,int y,int width,int rows,uint16_t *buffer)
 {
-    tile=buffer; tile_y=y; tile_rows=rows;
-    for (int j=0; j<320*rows; ++j) tile[j]=pack(bg);
+    if (x<0 || x>=320 || y<0 || y>=320 || width<=0 || width>320-x || rows<=0 || rows>320-y) return;
+    set_tile(buffer,x,y,width,rows);
+    for (int j=0; j<width*rows; ++j) tile[j]=pack(bg);
     /* Inner grid rings scale with the outer ring: 0.26 and 0.47 and 0.68 of R. */
     for (int r=29;r<=86;r+=r==29 ? 28 : 29)
         for (int a=0;a<360;a+=8) arc(a,a+3,r,0.8f,grid);
@@ -289,6 +316,8 @@ void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_
             float strength=1.0f-dy/reach;
             strength*=strength;
             int from=(int)floorf(CHART_CENTER_X-spread)-1,to=(int)ceilf(CHART_CENTER_X+spread)+1;
+            if (from<tile_x) from=tile_x;
+            if (to>=tile_x+tile_width) to=tile_x+tile_width-1;
             for (int px=from;px<=to;++px) {
                 float dx=fabsf((float)px-CHART_CENTER_X);
                 /* Soften both the outer edge and the centre so no hard step shows. */
@@ -407,9 +436,14 @@ void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_
     centered(status,297,CHART_FONT_STATUS,muted);
 }
 
+void chart_render_tile(const chart_model_t *m,int64_t now,int y,int rows,uint16_t *buffer)
+{
+    chart_render_rect(m,now,0,y,320,rows,buffer);
+}
+
 void chart_render_test_tile(int y,int rows,uint16_t *buffer)
 {
-    tile=buffer; tile_y=y; tile_rows=rows;
+    set_tile(buffer,0,y,320,rows);
     color_t colors[]={{255,0,0},{0,255,0},{0,0,255},{255,255,255}};
     color_t black={0,0,0};
     for (int py=y;py<y+rows;++py)
@@ -424,7 +458,7 @@ void chart_render_test_tile(int y,int rows,uint16_t *buffer)
 
 void chart_render_test_overlay(int y,int rows,uint16_t *buffer,const char *label,unsigned frame)
 {
-    tile=buffer; tile_y=y; tile_rows=rows;
+    set_tile(buffer,0,y,320,rows);
     for (int py=y<299 ? 299 : y;py<y+rows;++py)
         for (int x=0;x<320;++x) pixel(x,py,bg,15);
     int x=(frame*6)%318;
@@ -435,7 +469,7 @@ void chart_render_test_overlay(int y,int rows,uint16_t *buffer,const char *label
 void chart_render_refresh_tile(int y,int rows,uint16_t *buffer,const char *strategy,
                               float fps,int64_t elapsed_us,unsigned frame)
 {
-    tile=buffer; tile_y=y; tile_rows=rows;
+    set_tile(buffer,0,y,320,rows);
     color_t black={0,0,0}, light={220,220,220};
     color_t colors[]={{255,0,0},{0,255,0},{0,0,255},{255,255,255}};
     int position=(int)((elapsed_us/6250)%320); /* Same 160 px/s motion in every strategy. */

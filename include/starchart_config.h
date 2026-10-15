@@ -30,6 +30,10 @@
 #define CHART_LCD_REFRESH_Y 96
 #define CHART_LCD_REFRESH_HEIGHT 128 /* Two independently animated 64-row bands. */
 #define CHART_TILE_ROWS 16
+#define CHART_DIRTY_CELL 16
+#define CHART_DIRTY_COLS (320 / CHART_DIRTY_CELL)
+#define CHART_DIRTY_ROWS (320 / CHART_DIRTY_CELL)
+#define CHART_DIRTY_BYTES ((CHART_DIRTY_COLS * CHART_DIRTY_ROWS) / 8)
 #define CHART_FPS 60 /* Above the full-frame bandwidth limit, for refresh testing. */
 
 /* Shared layout: the renderer and chart_screen_point must agree on the centre. */

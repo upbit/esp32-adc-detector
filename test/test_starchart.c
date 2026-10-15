@@ -1,6 +1,7 @@
 #include "starchart.h"
 #include "starchart_font.h"
 #include <assert.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -171,6 +172,101 @@ static void render_tiles(void)
     puts("PASS: full-circle/faded/fractional-angle tiled raster matches full frame; test footer stays in its band");
 }
 
+static uint16_t rect_pixels[320*320+16];
+
+static void check_rect(int64_t now,int x,int y,int width,int rows)
+{
+    const uint16_t guard=0x5aa5;
+    for (unsigned i=0;i<sizeof(rect_pixels)/sizeof(*rect_pixels);++i) rect_pixels[i]=guard;
+    chart_render_rect(&model,now,x,y,width,rows,rect_pixels+8);
+    for (int py=0;py<rows;++py)
+        assert(memcmp(rect_pixels+8+py*width,frame+(y+py)*320+x,width*sizeof(*frame))==0);
+    for (int i=0;i<8;++i) assert(rect_pixels[i]==guard);
+    for (unsigned i=8+width*rows;i<sizeof(rect_pixels)/sizeof(*rect_pixels);++i)
+        assert(rect_pixels[i]==guard);
+}
+
+static void render_rects(void)
+{
+    assert(sizeof(chart_dirty_mask_t)==50);
+    chart_init(&model,UI_SIM,1000000);
+    clock_us=1000000;
+    for (int angle=0;angle<360;angle+=10)
+        for (int j=0;j<3;++j) sample(angle,-40-angle%50);
+    const struct { int x,y,w,h; } rects[]={
+        {0,0,320,320},{0,0,1,1},{319,319,1,1},{319,0,1,320},{0,319,320,1},
+        {46,42,229,229},{53,48,213,217},{0,276,320,44},{9,7,131,51},
+        {222,1,97,59},{154,31,13,126},{159,155,3,3},{14,146,31,17},
+        {270,146,49,19},{101,206,117,23},{63,293,193,27},{7,58,17,1},
+    };
+    const float headings[]={0,30.37f,60,-179.9f,179.9f,-90.25f,270.5f,720.37f};
+    const int64_t ages[]={0,CHART_FRESH_US,CHART_FRESH_US+1,CHART_DARK_US,
+                          CHART_DARK_US+1,CHART_HISTORY_US,CHART_HISTORY_US+1,25000000};
+    const chart_pose_status_t poses[]={CHART_READY,CHART_READY,CHART_CALIBRATING,CHART_IMU_ERROR,
+                                       CHART_READY,CHART_READY,CHART_READY,CHART_READY};
+    const chart_target_status_t targets[]={CHART_TARGET_LOCKED,CHART_TARGET_SEARCH,CHART_TARGET_LOCKED,
+        CHART_TARGET_LOCKED,CHART_TARGET_LOCKED,CHART_WIFI_ERROR,CHART_TARGET_MISSING,CHART_TARGET_LOCKED};
+    uint32_t random=0x12345678;
+    for (unsigned c=0;c<sizeof(headings)/sizeof(*headings);++c) {
+        model.heading=model.display_heading=headings[c];
+        model.pose_status=poses[c]; model.target_status=targets[c];
+        model.mode=c%2 ? LIVE_WIFI : UI_SIM;
+        model.tilt_deg=c==4 ? 45 : 0;
+        model.current_rssi=c%2 ? -104 : -7;
+        snprintf(model.source,sizeof(model.source),"%s",c%2 ? "HomeOffice_Camera_Backyard_5G" : "CAM_02?");
+        if (c==6) { model.source[0]=0; model.frequency_mhz=0; model.last_signal_us=0; }
+        /* Keep both sparse disconnected points and the last-to-first wrap connection. */
+        if (c==7) for (int i=1;i<CHART_BINS-1;++i)
+            if (i%3) model.bins[i].count=0;
+        int64_t now=clock_us+ages[c];
+        chart_model_t before=model;
+        chart_render_tile(&model,now,0,320,frame);
+        for (unsigned r=0;r<sizeof(rects)/sizeof(*rects);++r)
+            check_rect(now,rects[r].x,rects[r].y,rects[r].w,rects[r].h);
+        /* Reconstruct all screen pixels using tight, independently rendered rectangles. */
+        const int blocks[]={16,32};
+        for (unsigned b=0;b<sizeof(blocks)/sizeof(*blocks);++b)
+            for (int y=0;y<320;y+=blocks[b])
+                for (int x=0;x<320;x+=47) {
+                    int width=320-x<47 ? 320-x : 47;
+                    check_rect(now,x,y,width,blocks[b]);
+                }
+        for (int r=0;r<64;++r) {
+            int values[4];
+            for (int i=0;i<4;++i) { random=random*1664525u+1013904223u; values[i]=(int)(random>>16); }
+            int x=values[0]%320,y=values[1]%320;
+            check_rect(now,x,y,1+values[2]%(320-x),1+values[3]%(320-y));
+        }
+        assert(memcmp(&before,&model,sizeof(model))==0);
+    }
+    chart_clear(&model,clock_us+26000000);
+    chart_model_t cleared=model;
+    chart_render_tile(&model,clock_us+26000000,0,320,frame);
+    for (unsigned r=0;r<sizeof(rects)/sizeof(*rects);++r)
+        check_rect(clock_us+26000000,rects[r].x,rects[r].y,rects[r].w,rects[r].h);
+    assert(memcmp(&cleared,&model,sizeof(model))==0);
+    /* An invalid rectangle is rejected, not cropped with a different output stride. */
+    const struct { int x,y,w,h; } invalid[]={
+        {-1,0,16,16},{0,-1,16,16},{320,0,1,1},{0,320,1,1},
+        {319,319,2,1},{319,319,1,2},{0,0,321,320},{0,0,320,321},
+        {0,0,0,1},{0,0,1,0},{0,0,-1,1},{0,0,1,-1},
+        {INT_MIN,0,1,1},{0,INT_MAX,1,1},{0,0,INT_MAX,1},{0,0,1,INT_MAX},
+        {1,1,INT_MAX,INT_MAX},{0,0,INT_MIN,INT_MIN},
+    };
+    for (unsigned i=0;i<sizeof(rect_pixels)/sizeof(*rect_pixels);++i) rect_pixels[i]=0x5aa5;
+    for (unsigned r=0;r<sizeof(invalid)/sizeof(*invalid);++r) {
+        chart_render_rect(&model,clock_us,invalid[r].x,invalid[r].y,invalid[r].w,invalid[r].h,rect_pixels+8);
+        for (unsigned i=0;i<sizeof(rect_pixels)/sizeof(*rect_pixels);++i) assert(rect_pixels[i]==0x5aa5);
+    }
+    /* The diagnostic/overlay entries must restore their full-width context after a rect. */
+    chart_render_test_tile(96,CHART_TILE_ROWS,tile);
+    memcpy(frame,tile,sizeof(tile));
+    chart_render_rect(&model,clock_us,159,155,3,3,rect_pixels+8);
+    chart_render_test_tile(96,CHART_TILE_ROWS,tile);
+    assert(memcmp(frame,tile,sizeof(tile))==0);
+    puts("PASS: guarded tight rectangles, 16/32-row reconstruction, random crops, wrap/fade/status/clear cases, invalid no-write and read-only snapshots");
+}
+
 static void glyph_coverage(void)
 {
     /* Every drawable glyph must carry ink: a blank box means the bake clipped it. */
@@ -310,7 +406,7 @@ static void endurance(void)
 
 int main(void)
 {
-    geometry(); buckets(); synchronization(); calibration(); boot_pattern(); rendering(); render_tiles(); glyph_coverage(); refresh_pattern(); beacon_filter(); endurance();
+    geometry(); buckets(); synchronization(); calibration(); boot_pattern(); rendering(); render_tiles(); render_rects(); glyph_coverage(); refresh_pattern(); beacon_filter(); endurance();
     printf("All host tests passed. model=%zu bytes, tile=%zu bytes\n",sizeof(model),sizeof(tile));
     return 0;
 }

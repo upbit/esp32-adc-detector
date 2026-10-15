@@ -66,9 +66,19 @@ bool chart_integrate(chart_integrator_t *integrator, int64_t now,
                      const float gyro[3], const float accel[3], float *tilt);
 
 /* Pure RGB565 renderer shared by firmware and the host simulation. */
+typedef struct { uint8_t bits[CHART_DIRTY_BYTES]; } chart_dirty_mask_t;
+
 void chart_render_init(void);
+/* Full-screen coordinates, tight width stride, CPU byte order. Invalid rects do not write. */
+void chart_render_rect(const chart_model_t *snapshot, int64_t now,
+                       int x, int y, int width, int rows, uint16_t *rgb565);
+/* Full-width reference entry retained through P5. */
 void chart_render_tile(const chart_model_t *snapshot, int64_t now, int y, int rows,
                        uint16_t *rgb565);
+/* Approved P4 interface; implementation and callers arrive with dirty refresh. */
+void chart_mark_dirty(const chart_model_t *previous, int64_t previous_time,
+                      const chart_model_t *current, int64_t current_time,
+                      chart_dirty_mask_t *mask);
 void chart_render_test_tile(int y, int rows, uint16_t *rgb565);
 void chart_render_test_overlay(int y, int rows, uint16_t *rgb565,
                                const char *label, unsigned frame);
