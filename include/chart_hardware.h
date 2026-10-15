@@ -20,20 +20,14 @@ esp_err_t chart_lcd_tile_profiled(int y,int rows,uint16_t *pixels,chart_lcd_writ
                                  chart_lcd_timing_t *timing);
 /* Call only between completed transfers; all commands remain at baseline clock. */
 void chart_lcd_fast_pixels(bool enabled);
-#if CHART_LCD_REFRESH_TEST
 /* Single display-task owner. Close/drain before any tile write or mode change. */
-esp_err_t chart_lcd_window_begin(int y,int rows);
-esp_err_t chart_lcd_window_write(uint16_t *pixels,int rows);
+esp_err_t chart_lcd_window_begin(int x,int y,int width,int rows);
+/* CPU-order RGB565; <=32 rows and within the queried transaction limit.
+ * Converts once before queueing. Never retry a rejected block. */
 esp_err_t chart_lcd_window_submit(uint16_t *pixels,int rows,bool last);
 esp_err_t chart_lcd_window_wait(uint16_t **completed_pixels);
-/* Also call on failure to drain successful submissions; stop testing on error. */
+/* Also call on failure to drain successful submissions; stop displaying on error. */
 esp_err_t chart_lcd_window_end(chart_lcd_timing_t *timing);
-/* Same algorithm/state, independently compiled O2 experiment. */
-esp_err_t chart_lcd_window_begin_o2(int y,int rows);
-esp_err_t chart_lcd_window_submit_o2(uint16_t *pixels,int rows,bool last);
-esp_err_t chart_lcd_window_wait_o2(uint16_t **completed_pixels);
-esp_err_t chart_lcd_window_end_o2(chart_lcd_timing_t *timing);
-#endif
 esp_err_t chart_imu_init(void);
 esp_err_t chart_imu_read(float gyro[3],float accel[3]);
 esp_err_t chart_wifi_start(QueueHandle_t queue,char source[33],int *frequency);

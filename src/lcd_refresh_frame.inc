@@ -4,14 +4,14 @@ static REFRESH_FRAME_ATTR esp_err_t REFRESH_FRAME_FN(const refresh_strategy_t *s
                               chart_lcd_timing_t *timing)
 {
     const int end=CHART_LCD_REFRESH_Y+CHART_LCD_REFRESH_HEIGHT;
-    const int chunk=strategy->pipeline ? CHART_LCD_PIPE_ROWS : CHART_LCD_REFRESH_ROWS;
+    const int chunk=strategy->window ? CHART_TILE_ROWS : CHART_LCD_REFRESH_ROWS;
     bool opened=false;
     esp_err_t err=ESP_OK;
     for (int y=CHART_LCD_REFRESH_Y;y<end && err==ESP_OK;y+=chunk) {
         unsigned part=(y-CHART_LCD_REFRESH_Y)/chunk;
-        uint16_t *buffer=pixels+(strategy->pipeline ? (part%2)*320*chunk : 0);
+        uint16_t *buffer=pixels+(strategy->pipeline ? (part%2)*CHART_LCD_BUFFER_PIXELS : 0);
         int64_t started=esp_timer_get_time();
-        if (strategy->pipeline && part>=2) {
+        if (strategy->window && part>=(strategy->pipeline ? 2U : 1U)) {
             uint16_t *completed=NULL;
             err=REFRESH_WINDOW_FN(wait)(&completed);
             if (err==ESP_OK && completed!=buffer) err=ESP_ERR_INVALID_STATE;
@@ -19,17 +19,16 @@ static REFRESH_FRAME_ATTR esp_err_t REFRESH_FRAME_FN(const refresh_strategy_t *s
         *spi+=esp_timer_get_time()-started;
         if (err!=ESP_OK) break;
         started=esp_timer_get_time();
-        chart_render_refresh_band_wire(y,chunk,buffer,elapsed,frame);
+        if (strategy->window) chart_render_refresh_band(y,chunk,buffer,elapsed,frame);
+        else chart_render_refresh_band_wire(y,chunk,buffer,elapsed,frame);
         *draw+=esp_timer_get_time()-started;
         started=esp_timer_get_time();
         if (strategy->window) {
             if (!opened) {
-                err=REFRESH_WINDOW_FN(begin)(CHART_LCD_REFRESH_Y,CHART_LCD_REFRESH_HEIGHT);
+                err=REFRESH_WINDOW_FN(begin)(0,CHART_LCD_REFRESH_Y,320,CHART_LCD_REFRESH_HEIGHT);
                 opened=err==ESP_OK;
             }
-            if (err==ESP_OK) err=strategy->pipeline ?
-                REFRESH_WINDOW_FN(submit)(buffer,chunk,y+chunk==end) :
-                chart_lcd_window_write(buffer,chunk);
+            if (err==ESP_OK) err=REFRESH_WINDOW_FN(submit)(buffer,chunk,y+chunk==end);
         } else {
             chart_lcd_timing_t t={0};
             err=chart_lcd_tile_profiled(y,chunk,buffer,CHART_LCD_WRITE_WIRE,&t);

@@ -244,7 +244,7 @@ static void serial_task(void *arg)
 static void render_task(void *arg)
 {
     (void)arg;
-    uint16_t *pixels=heap_caps_malloc(320*CHART_TILE_ROWS*2,MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);
+    uint16_t *pixels=heap_caps_malloc(CHART_LCD_PIXEL_BYTES,MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);
     chart_model_t *snapshot=malloc(sizeof(*snapshot));
     if (!pixels || !snapshot) {
         free(pixels); free(snapshot);
@@ -341,8 +341,8 @@ void app_main(void)
 
 typedef struct { unsigned id; const char *label; bool window,pipeline,o2; } refresh_strategy_t;
 static const refresh_strategy_t refresh_strategies[]={
-    {14,"14 WINDOW PIPE32",true,true,false},
-    {15,"15 PIPE32 O2",true,true,true},
+    {14,"14 WINDOW PIPE16",true,true,false},
+    {15,"15 FRAME O2",true,true,true},
     {10,"10 WIRE 80M MAX",false,false,false},
     {13,"13 WINDOW SYNC",true,false,false},
 };
@@ -375,7 +375,7 @@ static void refresh_add_timing(chart_lcd_timing_t *total,const chart_lcd_timing_
 #undef REFRESH_FRAME_ATTR
 
 #define REFRESH_FRAME_FN refresh_frame_o2
-#define REFRESH_WINDOW_FN(name) chart_lcd_window_##name##_o2
+#define REFRESH_WINDOW_FN(name) chart_lcd_window_##name
 #if defined(__GNUC__) && !defined(__clang__)
 #define REFRESH_FRAME_ATTR __attribute__((optimize("O2"),noinline))
 #else
@@ -390,7 +390,7 @@ static void refresh_add_timing(chart_lcd_timing_t *total,const chart_lcd_timing_
 static void render_task(void *arg)
 {
     (void)arg;
-    uint16_t *pixels=heap_caps_malloc(320*CHART_LCD_REFRESH_ROWS*2,MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);
+    uint16_t *pixels=heap_caps_malloc(CHART_LCD_PIXEL_BYTES,MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);
     if (!pixels) { ESP_LOGE("lcd","tile allocation failed"); vTaskDelete(NULL); return; }
     ESP_ERROR_CHECK(chart_lcd_init());
     gpio_config_t button={.pin_bit_mask=1ULL<<CHART_LCD_BUTTON,.mode=GPIO_MODE_INPUT,
@@ -407,8 +407,8 @@ static void render_task(void *arg)
     int64_t bytes=0;
     int64_t last_start=0,interval_min=INT64_MAX,interval_max=0;
     int64_t dynamic_us=0,dynamic_max=0;
-    ESP_LOGI("lcd","baseline 14; BOOT cycles 14/15/10/13; command=%d MHz pixel=%d MHz dynamic=320x128; UI/IMU/Wi-Fi disabled; buffer=%d bytes",
-        CHART_LCD_SPI_HZ/1000000,CHART_LCD_FAST_SPI_HZ/1000000,320*CHART_LCD_REFRESH_ROWS*2);
+    ESP_LOGI("lcd","P3 adapted demo (not historical baseline); BOOT cycles 14/15/10/13; command=%d MHz pixel=%d MHz dynamic=320x128; UI/IMU/Wi-Fi disabled; buffer=%d bytes",
+        CHART_LCD_SPI_HZ/1000000,CHART_LCD_FAST_SPI_HZ/1000000,CHART_LCD_PIXEL_BYTES);
     for (;;) {
         if (refresh_button_pressed(esp_timer_get_time())) {
             strategy_index=(strategy_index+1)%(sizeof(refresh_strategies)/sizeof(*refresh_strategies));
@@ -430,7 +430,7 @@ static void render_task(void *arg)
             totals=(chart_lcd_timing_t){0};
             ESP_LOGI("lcd","strategy=%u %s window=%d pipeline=%d hot_o2=%d rows=%d",
                 strategy->id,strategy->label,strategy->window,strategy->pipeline,strategy->o2,
-                strategy->pipeline ? CHART_LCD_PIPE_ROWS : CHART_LCD_REFRESH_ROWS);
+                strategy->window ? CHART_TILE_ROWS : CHART_LCD_REFRESH_ROWS);
         }
         int64_t started=esp_timer_get_time(),elapsed=started-epoch;
         if (last_start) {

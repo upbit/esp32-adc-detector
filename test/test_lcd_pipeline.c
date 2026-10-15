@@ -23,7 +23,7 @@ esp_err_t gpio_config(const gpio_config_t *config) { (void)config; return ESP_OK
 void vTaskDelay(int ticks) { now_us+=ticks*1000; }
 esp_err_t spi_bus_initialize(int host,const spi_bus_config_t *config,int dma)
 {
-    assert(host==SPI2_HOST && dma==SPI_DMA_CH_AUTO && config->max_transfer_sz==40960);
+    assert(host==SPI2_HOST && dma==SPI_DMA_CH_AUTO && config->max_transfer_sz==10240);
     return ESP_OK;
 }
 esp_err_t spi_bus_add_device(int host,const spi_device_interface_config_t *config,spi_device_handle_t *handle)
@@ -33,7 +33,7 @@ esp_err_t spi_bus_add_device(int host,const spi_device_interface_config_t *confi
 }
 esp_err_t spi_bus_get_max_transaction_len(int host,size_t *limit)
 {
-    assert(host==SPI2_HOST); *limit=32767; return ESP_OK;
+    assert(host==SPI2_HOST); *limit=12279; return ESP_OK;
 }
 esp_err_t spi_device_get_actual_freq(spi_device_handle_t handle,int *khz)
 {
@@ -60,7 +60,7 @@ esp_err_t spi_device_polling_transmit(spi_device_handle_t handle,spi_transaction
 static void transfer(const spi_transaction_t *t)
 {
     assert(dc==1 && t->override_freq_hz==CHART_LCD_FAST_SPI_HZ);
-    assert(t->length%32==0 && t->length/8<=32764);
+    assert(t->length%32==0 && t->length/8<=12276);
     size_t n=t->length/8;
     assert(payload_size+n<=sizeof(payload));
     memcpy(payload+payload_size,t->tx_buffer,n); payload_size+=n;
@@ -128,12 +128,12 @@ static void frames(void)
                 assert(run_frame(s,bar*6250LL,frame,&draw,&spi,&t)==ESP_OK);
                 assert(payload_size==sizeof(payload) && !cs_active && !acquired && !queued_count);
                 assert(memcmp(payload,expected,sizeof(payload))==0);
-                assert(transaction_count==4 && command_count==(refresh_strategies[s].window ? 3 : 6));
+                assert(transaction_count==8 && command_count==(refresh_strategies[s].window ? 3 : 6));
                 for (unsigned i=0;i<command_count;i+=3)
                     assert(commands[i]==0x2a && commands[i+1]==0x2b && commands[i+2]==0x2c);
                 assert(t.command_khz==40000 && t.pixel_khz==80000 && draw>0 && spi>0);
             }
-    puts("PASS: 14/15(O2)/10/13 all positions/markers match; four transactions, CS and DMA ownership");
+    puts("PASS: adapted demo positions/markers match; queried limit, CS and DMA ownership");
 }
 
 static void failures(void)
@@ -144,10 +144,10 @@ static void failures(void)
         assert(run_frame(3,0,0,&draw,&spi,&t)==ESP_ERR_INVALID_STATE);
         assert(!queued_count && !acquired && !lcd_window.open && lcd_window.failed);
     }
-    for (unsigned fail=1;fail<=4;++fail) {
-        reset(); fail_transmit_at=fail;
+    for (unsigned fail=1;fail<=8;++fail) {
+        reset(); fail_queue_at=fail;
         int64_t draw=0,spi=0; chart_lcd_timing_t t={0};
-        assert(run_frame(3,0,0,&draw,&spi,&t)==ESP_ERR_INVALID_STATE);
+        assert(run_frame(3,0,0,&draw,&spi,&t)==ESP_ERR_NO_MEM);
         assert(!queued_count && !acquired && !lcd_window.open && lcd_window.failed);
     }
     for (unsigned s=0;s<2;++s) for (unsigned fail=1;fail<=5;++fail) {
@@ -156,27 +156,26 @@ static void failures(void)
         assert(run_frame(s,0,0,&draw,&spi,&t)==ESP_ERR_INVALID_STATE);
         assert(!queued_count && !acquired && !lcd_window.open && lcd_window.failed);
     }
-    for (unsigned s=0;s<2;++s) for (unsigned fail=1;fail<=4;++fail) {
+    for (unsigned s=0;s<2;++s) for (unsigned fail=1;fail<=8;++fail) {
         reset(); fail_queue_at=fail;
         int64_t draw=0,spi=0; chart_lcd_timing_t t={0};
         assert(run_frame(s,0,0,&draw,&spi,&t)==ESP_ERR_NO_MEM);
         assert(!queued_count && !acquired && !lcd_window.open && lcd_window.failed);
-        assert(chart_lcd_window_begin(96,128)==ESP_ERR_INVALID_STATE);
+        assert(chart_lcd_window_begin(0,96,320,128)==ESP_ERR_INVALID_STATE);
     }
-    for (unsigned s=0;s<2;++s) for (unsigned fail=1;fail<=4;++fail) {
+    for (unsigned s=0;s<2;++s) for (unsigned fail=1;fail<=8;++fail) {
         reset(); fail_result_at=fail;
         int64_t draw=0,spi=0; chart_lcd_timing_t t={0};
         assert(run_frame(s,0,0,&draw,&spi,&t)==ESP_ERR_INVALID_STATE);
         assert(!queued_count && !acquired && !lcd_window.open && lcd_window.failed);
     }
     reset();
-    assert(chart_lcd_window_begin(96,128)==ESP_OK);
+    assert(chart_lcd_window_begin(0,96,320,128)==ESP_OK);
     assert(chart_lcd_tile(96,32,pixels)==ESP_ERR_INVALID_STATE);
     assert(chart_lcd_window_submit(pixels,32,true)==ESP_ERR_INVALID_ARG);
     assert(chart_lcd_window_submit(pixels,64,false)==ESP_ERR_INVALID_ARG);
-    assert(chart_lcd_window_submit(pixels,32,false)==ESP_OK);
-    assert(chart_lcd_window_submit(pixels,32,false)==ESP_ERR_INVALID_STATE);
-    assert(chart_lcd_window_write(pixels,32)==ESP_ERR_INVALID_STATE);
+    assert(chart_lcd_window_submit(pixels,16,false)==ESP_OK);
+    assert(chart_lcd_window_submit(pixels,16,false)==ESP_ERR_INVALID_STATE);
     assert(chart_lcd_window_end(&((chart_lcd_timing_t){0}))==ESP_ERR_INVALID_STATE);
     assert(!queued_count && !acquired);
     puts("PASS: rejected submissions preserve ownership; failed partial windows drain and stop");
@@ -213,7 +212,7 @@ int main(void)
 {
     /* Exercise both swap helpers in this translation unit as well. */
     uint16_t word=0x1234; lcd_swap_baseline(&word,1); lcd_swap_optimized(&word,1); assert(word==0x1234);
-    assert(chart_lcd_init()==ESP_OK && lcd_dma_max==32764);
+    assert(chart_lcd_init()==ESP_OK && lcd_dma_max==12276);
     chart_lcd_fast_pixels(true);
     frames(); failures(); button(); return 0;
 }
