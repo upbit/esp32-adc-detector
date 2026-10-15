@@ -79,6 +79,20 @@ void chart_render_tile(const chart_model_t *snapshot, int64_t now, int y, int ro
 void chart_mark_dirty(const chart_model_t *previous, int64_t previous_time,
                       const chart_model_t *current, int64_t current_time,
                       chart_dirty_mask_t *mask);
+#if CHART_RENDER_BENCHMARK
+/* One-shot draw-cost attribution; the caller supplies the clock so the renderer
+ * stays free of platform headers. All values are microseconds. */
+typedef struct {
+    int64_t clear_us,static_us,bins_us,peak_us,trend_us,text_us,scene_us;
+    int64_t fixed_call_us;
+    int64_t float_mul_us,float_div_us,sqrtf_us,sinf_us,int_muldiv_us;
+    float sink;
+} chart_render_cost_t;
+int64_t chart_bench_now(void);
+void chart_render_benchmark(const chart_model_t *snapshot, int64_t now,
+                            uint16_t *rgb565, chart_render_cost_t *out);
+#endif
+
 /* Colour/alignment diagnostics, compiled only when explicitly enabled. The bit
  * ruler puts bit k in block k so a shifted pixel stream slides it k blocks; the
  * 0x0000/0xffff scale rows are rotation fixed points and stay readable however

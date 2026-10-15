@@ -38,6 +38,9 @@
 #ifndef CHART_LCD_SHIFT_DIAGNOSTIC
 #define CHART_LCD_SHIFT_DIAGNOSTIC 0 /* 1 overlays the bit ruler and swatches. */
 #endif
+#ifndef CHART_RENDER_BENCHMARK
+#define CHART_RENDER_BENCHMARK 0 /* 1 reports a one-shot draw-cost breakdown at boot. */
+#endif
 #if CHART_LCD_SHIFT_DIAGNOSTIC
 /* Amber is the only palette entry with a saturated red channel and live G/B
  * bits, so it is the one colour that exposes a shifted stream; the other four

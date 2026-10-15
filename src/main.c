@@ -309,6 +309,11 @@ static display_rect_iterator_t display_rect_plan(const chart_dirty_mask_t *mask)
     return plan;
 }
 
+#if CHART_RENDER_BENCHMARK
+/* The renderer must not include platform headers, so it calls back for time. */
+int64_t chart_bench_now(void) { return esp_timer_get_time(); }
+#endif
+
 static void display_draw(const chart_model_t *snapshot,int64_t now,display_rect_t rect,
                          int offset,int rows,uint16_t *pixels,bool in_flight,display_work_t *work)
 {
@@ -458,6 +463,30 @@ static void render_task(void *arg)
     ESP_LOGI("lcd","starting dirty star chart; command=%d MHz pixel=%d MHz pixels=%d snapshot=%u displayed=%u stack=6144",
         CHART_LCD_SPI_HZ/1000000,CHART_LCD_FAST_SPI_HZ/1000000,CHART_LCD_PIXEL_BYTES,
         (unsigned)sizeof(*snapshot),(unsigned)sizeof(*displayed));
+#if CHART_RENDER_BENCHMARK
+    {   /* Attribute the draw cost once, on a populated snapshot, before the
+         * loop starts competing with pose/signal tasks for the CPU. */
+        lock(); memcpy(snapshot,&model,sizeof(model)); unlock();
+        chart_render_cost_t cost;
+        chart_render_benchmark(snapshot,esp_timer_get_time(),pixels,&cost);
+        ESP_LOGW("bench","320x32 band: clear=%lld static=%lld bins=%lld peak=%lld trend=%lld text=%lld us; whole scene=%lld us; sum_parts=%lld us",
+            (long long)cost.clear_us,(long long)cost.static_us,(long long)cost.bins_us,
+            (long long)cost.peak_us,(long long)cost.trend_us,(long long)cost.text_us,
+            (long long)cost.scene_us,
+            (long long)(cost.static_us+cost.bins_us+cost.peak_us+cost.trend_us+cost.text_us));
+        ESP_LOGW("bench","a 320x320 frame is 10 such bands: scene would be ~%lld us if cost scaled with area",
+            (long long)(cost.scene_us*10));
+        ESP_LOGW("bench","fixed cost of one chart_render_rect call (1x1) = %lld us; a 25-rect dirty frame pays this 25x = %lld us",
+            (long long)cost.fixed_call_us,(long long)(cost.fixed_call_us*25));
+        ESP_LOGW("bench","primitives per 4096 ops: float_mul=%lld float_div=%lld sqrtf=%lld sinf=%lld int_muldiv=%lld us (no FPU: RVFPLIB)",
+            (long long)cost.float_mul_us,(long long)cost.float_div_us,(long long)cost.sqrtf_us,
+            (long long)cost.sinf_us,(long long)cost.int_muldiv_us);
+        ESP_LOGW("bench","ns per op: float_mul=%lld float_div=%lld sqrtf=%lld sinf=%lld int_muldiv=%lld (sink=%d)",
+            (long long)(cost.float_mul_us*1000/4096),(long long)(cost.float_div_us*1000/4096),
+            (long long)(cost.sqrtf_us*1000/4096),(long long)(cost.sinf_us*1000/4096),
+            (long long)(cost.int_muldiv_us*1000/4096),(int)cost.sink);
+    }
+#endif
     for (;;) {
         int64_t started=esp_timer_get_time();
         lock(); memcpy(snapshot,&model,sizeof(model)); unlock();
