@@ -1,6 +1,5 @@
 #include "chart_hardware.h"
 
-#include <errno.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -16,7 +15,7 @@
 #endif
 
 #ifndef CHART_LCD_HOST_TEST
-typedef enum { CMD_MODE, CMD_ANGLE, CMD_AUTO, CMD_SIGNAL, CMD_CLEAR, CMD_ZERO, CMD_CAL } command_type_t;
+typedef enum { CMD_MODE, CMD_SIGNAL, CMD_CLEAR, CMD_ZERO, CMD_CAL, CMD_IMU } command_type_t;
 typedef struct { command_type_t type; float value; } command_t;
 typedef struct { chart_mode_t mode; unsigned revision; } wifi_request_t;
 static chart_model_t model;
@@ -33,9 +32,8 @@ static void pose_task(void *arg)
     (void)arg;
     chart_integrator_t integrator;
     chart_integrator_reset(&integrator);
-    bool imu_ready=false,automatic=true,signal_enabled=true;
+    bool imu_ready=false,signal_enabled=true;
     bool calibrated_before=false;
-    float sim_heading=0,sim_display=0;
     int64_t previous=esp_timer_get_time(),last_sim=previous;
     chart_mode_t mode=CHART_DEFAULT_MODE;
     bool configure=true;
@@ -45,30 +43,41 @@ static void pose_task(void *arg)
         command_t cmd;
         while (xQueueReceive(commands,&cmd,0)==pdTRUE) {
             if (cmd.type==CMD_MODE) { mode=(chart_mode_t)cmd.value; configure=true; }
-            else if (cmd.type==CMD_AUTO) automatic=cmd.value!=0;
             else if (cmd.type==CMD_SIGNAL) signal_enabled=cmd.value!=0;
-            else if (cmd.type==CMD_ANGLE && mode==UI_SIM) {
-                automatic=false;
-                sim_heading += chart_wrap180(cmd.value-sim_heading);
+            else if (cmd.type==CMD_IMU) {
+                /* Raw gyro/accel dump: confirms the mount axis and the yaw sign
+                 * against a physical rotation, since neither is measured. */
+                float gyro[3],accel[3];
+                if (chart_imu_read(gyro,accel)==ESP_OK)
+                    ESP_LOGI("imu","gyro=%.3f,%.3f,%.3f dps accel=%.3f,%.3f,%.3f g yaw_rate=%.3f",
+                        gyro[0],gyro[1],gyro[2],accel[0],accel[1],accel[2],
+                        chart_yaw_rate(gyro,integrator.bias,accel));
+                else ESP_LOGW("imu","read failed");
             } else if (cmd.type==CMD_CLEAR || cmd.type==CMD_ZERO || cmd.type==CMD_CAL) {
                 lock();
                 if (cmd.type==CMD_CLEAR) chart_clear(&model,now);
                 else {
                     chart_zero(&model,now);
-                    sim_heading=sim_display=0;
                     integrator.heading=integrator.display_heading=0;
-                    if (cmd.type==CMD_CAL && mode!=UI_SIM) {
+                    if (cmd.type==CMD_CAL) {
                         chart_integrator_reset(&integrator);
                         model.pose_status=CHART_CALIBRATING;
+                        model.gate_retries=0;
+                        model.fatal=CHART_FATAL_NONE;
                         calibrated_before=false;
                     }
                 }
                 unlock();
                 xQueueReset(signals);
-                if (cmd.type==CMD_CAL && mode!=UI_SIM) {
+                if (cmd.type==CMD_CAL) {
                     esp_err_t err=chart_imu_init();
                     imu_ready=err==ESP_OK;
-                    if (!imu_ready) { lock(); model.pose_status=CHART_IMU_ERROR; unlock(); }
+                    lock();
+                    if (!imu_ready) {
+                        model.pose_status=CHART_IMU_ERROR;
+                        model.fatal=err==ESP_ERR_NOT_FOUND ? CHART_FATAL_NO_IMU : CHART_FATAL_I2C;
+                    }
+                    unlock();
                     ESP_LOGI("pose","IMU retry: %s",esp_err_to_name(err));
                     now=esp_timer_get_time();
                     wake=xTaskGetTickCount();
@@ -79,8 +88,7 @@ static void pose_task(void *arg)
             configure=false;
             chart_integrator_reset(&integrator);
             calibrated_before=false;
-            sim_heading=sim_display=0;
-            automatic=true; signal_enabled=true;
+            signal_enabled=true;
             lock();
             chart_init(&model,mode,now);
             wifi_request_t request={mode,++mode_revision};
@@ -88,33 +96,34 @@ static void pose_task(void *arg)
             xQueueReset(signals);
             xQueueOverwrite(wifi_requests,&request);
             imu_ready=false;
-            if (mode!=UI_SIM) {
-                esp_err_t err=chart_imu_init();
-                imu_ready=err==ESP_OK;
-                if (!imu_ready) { lock(); model.pose_status=CHART_IMU_ERROR; unlock(); }
-                ESP_LOGI("pose","IMU initialization: %s; no simulation fallback",esp_err_to_name(err));
+            esp_err_t err=chart_imu_init();
+            imu_ready=err==ESP_OK;
+            lock();
+            if (!imu_ready) {
+                model.pose_status=CHART_IMU_ERROR;
+                model.fatal=err==ESP_ERR_NOT_FOUND ? CHART_FATAL_NO_IMU : CHART_FATAL_I2C;
             }
+            unlock();
+            ESP_LOGI("pose","IMU initialization: %s; no simulation fallback",esp_err_to_name(err));
             now=esp_timer_get_time(); previous=last_sim=now;
             wake=xTaskGetTickCount();
-            ESP_LOGI("chart","mode=%s",mode==UI_SIM ? "UI_SIM" : mode==IMU_SIM_RSSI ? "IMU_SIM_RSSI" : "LIVE_WIFI");
+            ESP_LOGI("chart","mode=%s",mode==IMU_SIM_RSSI ? "IMU_SIM_RSSI" : "LIVE_WIFI");
         }
-        float dt=(now-previous)/1000000.0f;
         previous=now;
         bool ready=false;
-        if (mode==UI_SIM) {
-            if (automatic) sim_heading+=CHART_SIM_SPEED_DPS*dt;
-            sim_display+=(1-expf(-dt/CHART_DISPLAY_TAU_S))*(sim_heading-sim_display);
-            lock();
-            chart_record_pose(&model,now,sim_heading,sim_display);
-            unlock();
-            ready=true;
-        } else if (imu_ready) {
+        if (imu_ready) {
             float gyro[3],accel[3],tilt;
             esp_err_t err=chart_imu_read(gyro,accel);
             now=esp_timer_get_time();
             if (err!=ESP_OK) {
+                /* A read that fails after a good init is still unrecoverable
+                 * here: without samples the relative yaw cannot be trusted. */
                 imu_ready=false;
-                lock(); model.pose_status=CHART_IMU_ERROR; chart_clear(&model,now); unlock();
+                lock();
+                model.pose_status=CHART_IMU_ERROR;
+                model.fatal=CHART_FATAL_I2C;
+                chart_clear(&model,now);
+                unlock();
                 ESP_LOGE("pose","IMU read: %s; use cal to retry",esp_err_to_name(err));
             } else {
                 ready=chart_integrate(&integrator,now,gyro,accel,&tilt);
@@ -123,7 +132,29 @@ static void pose_task(void *arg)
                 if (!ready && calibrated_before) chart_zero(&model,now);
                 model.pose_status=ready ? CHART_READY : CHART_CALIBRATING;
                 model.tilt_deg=tilt;
-                if (ready) chart_record_pose(&model,now,integrator.heading,integrator.display_heading);
+                model.level_x=integrator.level_x;
+                model.level_y=integrator.level_y;
+                model.still_ms=integrator.still_ms;
+                model.cal_reason=integrator.reason;
+                /* A rejected window repeats the guidance instead of trusting the
+                 * bias, and never falls back to simulated motion. Only completed
+                 * windows count; motion merely restarts the countdown. Only a
+                 * sensor that cannot be read at all is fatal. */
+                if (integrator.rejected && model.fatal==CHART_FATAL_NONE) {
+                    if (++model.gate_retries>=CHART_MAX_GATE_RETRIES) {
+                        model.fatal=CHART_FATAL_GATE;
+                        ESP_LOGE("pose","calibration gate failed %d times: %s",
+                            model.gate_retries,chart_cal_reason_text(integrator.reason));
+                    } else {
+                        ESP_LOGW("pose","calibration rejected: %s; retry %d/%d",
+                            chart_cal_reason_text(integrator.reason),
+                            model.gate_retries,CHART_MAX_GATE_RETRIES);
+                    }
+                }
+                if (ready) {
+                    model.gate_retries=0;
+                    chart_record_pose(&model,now,integrator.heading,integrator.display_heading);
+                }
                 unlock();
                 if (ready && !calibrated_before)
                     ESP_LOGI("pose","calibrated bias=%.4f,%.4f,%.4f dps; relative yaw only",
@@ -134,7 +165,7 @@ static void pose_task(void *arg)
         }
         if (mode!=LIVE_WIFI && ready && signal_enabled && now-last_sim>=CHART_SIM_PERIOD_US) {
             last_sim=now;
-            float heading=mode==UI_SIM ? sim_heading : integrator.heading;
+            float heading=integrator.heading;
             float noise=CHART_SIM_NOISE_DB ? CHART_SIM_NOISE_DB*((esp_random()%2001)/1000.0f-1) : 0;
             chart_signal_event_t sample={now,(int8_t)lroundf(chart_synthetic_rssi(heading)+noise),true};
             if (xQueueSend(signals,&sample,0)!=pdTRUE) ESP_LOGW("chart","synthetic queue full");
@@ -186,10 +217,12 @@ static void signal_task(void *arg)
 
 static void help(void)
 {
-    puts("\nhelp | mode ui / imu / live | angle <degrees> (UI_SIM only)\n"
-         "auto on/off | signal on/off (synthetic only) | clear | zero | cal | stats\n"
-         "UI_SIM and IMU_SIM_RSSI use synthetic RSSI; LIVE_WIFI needs configured SSID.\n"
-         "clear resets samples; zero also resets relative yaw; cal retries IMU calibration.\n");
+    puts("\nhelp | mode imu / live | signal on/off | clear | zero | cal | imu | stats\n"
+         "IMU_SIM_RSSI uses real MPU6050 yaw with synthetic RSSI; LIVE_WIFI needs an SSID.\n"
+         "There is no simulated pose: without a readable MPU6050 the panel shows the\n"
+         "fatal screen instead of inventing motion.\n"
+         "clear resets samples; zero also resets relative yaw; cal re-runs calibration;\n"
+         "imu dumps raw gyro/accel and the projected yaw rate for axis/sign checks.\n");
 }
 
 static void serial_task(void *arg)
@@ -210,24 +243,22 @@ static void serial_task(void *arg)
                 ESP_LOGI("stats","heading=%.3f display=%.3f tilt=%.1f bins=%d/%d packets=%lu rejected=%lu age_max=%lld us",
                     model.heading,model.display_heading,model.tilt_deg,model.coverage,CHART_BINS,
                     (unsigned long)model.samples,(unsigned long)model.sync_rejected,(long long)model.max_event_age_us);
+                ESP_LOGI("stats","pose=%d fatal=%d(%s) reason=%s still_ms=%d retries=%d level=%.3f,%.3f",
+                    model.pose_status,model.fatal,chart_fatal_text(model.fatal),
+                    chart_cal_reason_text(model.cal_reason),model.still_ms,model.gate_retries,
+                    model.level_x,model.level_y);
                 unlock(); continue;
             }
             command_t cmd={0}; bool valid=true;
-            if (!strcmp(line,"mode ui")) cmd=(command_t){CMD_MODE,UI_SIM};
-            else if (!strcmp(line,"mode imu")) cmd=(command_t){CMD_MODE,IMU_SIM_RSSI};
+            if (!strcmp(line,"mode imu")) cmd=(command_t){CMD_MODE,IMU_SIM_RSSI};
             else if (!strcmp(line,"mode live")) cmd=(command_t){CMD_MODE,LIVE_WIFI};
-            else if (!strcmp(line,"auto on")) cmd=(command_t){CMD_AUTO,1};
-            else if (!strcmp(line,"auto off")) cmd=(command_t){CMD_AUTO,0};
             else if (!strcmp(line,"signal on")) cmd=(command_t){CMD_SIGNAL,1};
             else if (!strcmp(line,"signal off")) cmd=(command_t){CMD_SIGNAL,0};
             else if (!strcmp(line,"clear")) cmd.type=CMD_CLEAR;
             else if (!strcmp(line,"zero")) cmd.type=CMD_ZERO;
             else if (!strcmp(line,"cal")) cmd.type=CMD_CAL;
-            else if (!strncmp(line,"angle ",6)) {
-                char *end; errno=0;
-                cmd=(command_t){CMD_ANGLE,strtof(line+6,&end)};
-                valid=end!=line+6 && !*end && !errno && isfinite(cmd.value);
-            } else valid=false;
+            else if (!strcmp(line,"imu")) cmd.type=CMD_IMU;
+            else valid=false;
             if (!valid) puts("Unknown command; type help");
             else if (xQueueSend(commands,&cmd,pdMS_TO_TICKS(100))!=pdTRUE) puts("Command queue busy");
             else puts("OK");

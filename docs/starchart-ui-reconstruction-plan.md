@@ -596,3 +596,44 @@ P3软件退出条件已满足，实机方向/颜色/任意窗口、80 MHz可靠�
 新增成功显示状态在主机ABI下约7272 B（含7256 B模型、时间和valid），另保留当前快照；固件无帧内堆分配，mask50 B和有界迭代器/计时/17桶直方图使用显示任务栈。设备ABI/实际堆栈高水位以启动日志与P6实测为准，不把静态构建RAM数字当作运行时预算。
 
 P2全圈约1.8 FPS/0.5秒绘制的实机风险仍未解除。P4减少传输、实现重叠，但未测实际矩形绘制成本，也未证明120 FPS；不根据主机结果削减已验收视觉。P4软件工作完成，等待用户反馈再进入P5或安排实机核验。
+
+## 15. P6 执行记录
+
+2026-10-16。用户要求接入已连接的 MPU6050 获取真实方向，设计上电基准校准流程。讨论后选择方案 B（重力投影定轴）+ UI 引导（气泡对圆心 + 3 s 静置倒计时 + 校验门）；真机移除 UI_SIM 模拟姿态；校验失败循环引导不回退模拟，不可恢复错误进入红色错误屏并英文提示原因。用户确认：默认上电进入真实 IMU 模式、错误屏用英文（不动字库）、气泡对齐现有圆心 (160,156)。
+
+### 变化与实现
+
+- `src/starchart.c`：新增 `chart_yaw_rate(gyro, bias, accel)` —— `ψ̇ = dot(ω−bias, â)`，`â` 为单位重力矢量。这是数学恒等式（5 万随机姿态数值验证，最大误差 1.3e-15 rad/s），对任意倾角精确，取代固定轴 `ω_body[axis]`；`CHART_IMU_YAW_AXIS` 从配置中删除。校准分支加入数据校验门：样本数、逐轴陀螺方差（<0.04 dps²）、零偏幅值（<5 dps）、重力幅值（0.85–1.15 g）、上轴分量（≥0.9）与倾斜（<20°）任一不满足即拒绝并重启静置窗口；拒绝原因记录到 `reason` 供屏幕显示。校准窗口时长 2.5 s → 3 s（`CHART_CALIBRATION_US=3000000`）。
+- `src/starchart_render.c`：新增校准引导覆盖层——由 `level_x/level_y`（重力水平分量）驱动的气泡（目标为圆心 5 px 半径），倒计时环与剩余秒数（放在转角位置，校准期间隐藏转角读数避免重叠）；新增红色致命错误屏（底色 #40100E，中心英文原因 + `CHECK WIRING` + 重试次数，布局保留）。状态文案改为英文/数字（`HOLD STILL`、`LEVEL DEVICE`、`KEEP STILL` 等，利用已烘焙 ASCII 不改 384 字形字库）；「模拟」角标仅 `mode imu` 显示（RSSI 仍为合成），`mode live` 隐藏。
+- `src/main.c`：默认模式改为 `IMU_SIM_RSSI`（上电即初始化真实 IMU）；`mode ui`/`angle`/`auto` 命令与模拟器分支全部移除，新增 `imu` 原始数据转储与 `stats` 校准状态行。姿态任务循环区分：校验失败（恢复性）重复引导并计数，达到 `CHART_MAX_GATE_RETRIES` 后 `fatal=CHART_FATAL_GATE`；I²C/WHO_AM_I 失败（不可恢复）直接进入对应致命原因。校准成功才 `gate_retries` 清零。`errno.h` 等不再需要的头文件移除。
+- `include/starchart_config.h`：新增校准门常量（`CHART_CAL_MIN_SAMPLES=30`、`CHART_CAL_MAX_BIAS_DPS=5.0`、`CHART_CAL_MAX_VAR_DPS2=0.04`、`CHART_CAL_MIN/MAX_ACCEL_G=0.85/1.15`、`CHART_CAL_MIN_UP_G=0.9`、`CHART_MAX_GATE_RETRIES=8`）；`CHART_DEFAULT_MODE` 0→1。
+- `include/starchart.h`：模型增加 `level_x/level_y/still_ms/gate_retries/cal_reason/fatal`；积分器增加 `level_x/level_y/still_ms/reason`；新增 `chart_cal_reason_t`、`chart_fatal_t` 枚举与 `chart_cal_reason_text`、`chart_fatal_text`、`chart_yaw_rate` 接口。
+- 主机测试模型 ABI 7256→7280 B（+24 B，五个新字段），在 40 KiB DMA 预算外的模型空间内，无运行时动态分配。
+
+### 成本实测
+
+| 指标 | 基线（P5） | P6 | 差异 |
+|---|---|---|---|
+| `chart_integrate` 指令数 | 390 | 450 | +60（含新校验门逻辑，非纯投影） |
+| `chart_yaw_rate` 指令数 | — | 111 | 新增（其中 sqrtf 复用现状路径，软浮点调用数与旧固定轴路径相同） |
+| 模型大小（主机 ABI） | 7256 B | 7280 B | +24 B |
+| 固件总大小 | — | 326396 B | 无溢出 |
+
+软浮点调用对比：`chart_yaw_rate` 与原固定轴公式调用集合完全一致（`__mulsf3`×3、`__addsf3`×2、`sqrtf`、`__gtsf2`、`__divsf3`），仅在 `-Og -march=rv32imac_zicsr_zifencei` 下编译时**多了 2 条整数搬运指令**——因为现状 `accel[2]/norm` 改为 `1/norm` 后复用乘法。姿态任务 100 Hz 下增量 <1 µs/次（<0.01% 单核 CPU），渲染路径不变，不会造成掉速。
+
+### 测试与验证
+
+- `sh tools/test_chart.sh` 全部通过：既有几何/桶/同步/校准/渲染/矩形/Beacon/耐久回归 + 新增 4 项：
+  - `boot_guidance`：运动中断校准窗口并重置倒计时，静置完成校准且 heading 置零，不发明姿态。
+  - `calibration_gate`：静置通过、样本不足拒绝、噪声拒绝、零偏过大拒绝、重力异常拒绝、倾斜拒绝（reason 正确）。
+  - `gravity_yaw`：水平/倾斜投影正确（9.397 dps at 20° tilt）、非垂直轴运动不贡献偏航、退化重力返回 0。
+  - `pose_transition`：CALIBRATING→READY 转换必须全屏失效（验证清除旧气泡像素）。
+- ESP32-C5 默认配置固件编译通过（ESP-IDF 5.5.5 / GCC 14.2.0，326396 B）。
+- 校准引导与致命错误屏生成预览 PNG（`case-cal-bubble`、`case-cal-countdown`、`case-cal-level`、`case-fatal-no-imu`、`case-fatal-gate`），目视确认布局无重叠。
+
+### 遗留与实机验收项
+
+- `CHART_IMU_YAW_SIGN=-1` 仍是可配置初值，需实机顺时针转验证符号（`imu` 命令 + `stats heading`）。
+- 校准门阈值（噪声方差 0.04 dps²、重力 0.85–1.15 g 等）需实机标定确认，不排除初次阈值过严导致多次重试。
+- 上电校准倒计时与引导覆盖层的脏格全屏失效成本未实测（每轮校准仅两次全屏转换，预期可接受）。
+- 实机未烧录：上电流程、IMU 读取、引导 UI、红色错误屏、串口 `imu`/`stats` 输出均待用户实机确认。

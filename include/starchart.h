@@ -7,6 +7,13 @@
 
 typedef enum { UI_SIM, IMU_SIM_RSSI, LIVE_WIFI } chart_mode_t;
 typedef enum { CHART_READY, CHART_CALIBRATING, CHART_IMU_ERROR } chart_pose_status_t;
+/* Why the last calibration window was rejected; shown on screen while the
+ * guidance loop repeats, and reported by `stats`. */
+typedef enum { CHART_CAL_OK, CHART_CAL_MOTION, CHART_CAL_TILT, CHART_CAL_NOISE,
+               CHART_CAL_BIAS, CHART_CAL_GRAVITY } chart_cal_reason_t;
+/* Unrecoverable: the IMU cannot be read at all. Paints the red screen. */
+typedef enum { CHART_FATAL_NONE, CHART_FATAL_NO_IMU, CHART_FATAL_I2C,
+               CHART_FATAL_GATE } chart_fatal_t;
 typedef enum { CHART_TARGET_SEARCH, CHART_TARGET_LOCKED, CHART_TARGET_MISSING,
                CHART_WIFI_ERROR } chart_target_status_t;
 
@@ -28,6 +35,12 @@ typedef struct {
     char source[33];
     int frequency_mhz;
     float heading, display_heading, tilt_deg;
+    /* Calibration guidance: how level the device is and how long the current
+     * still window has been held. `still_ms` drives the countdown ring. */
+    float level_x, level_y;
+    int still_ms, gate_retries;
+    chart_cal_reason_t cal_reason;
+    chart_fatal_t fatal;
     chart_bin_t bins[CHART_BINS];
     int peak_bin, coverage;
     float current_rssi, recent[CHART_WINDOW];
@@ -47,6 +60,10 @@ typedef struct {
     unsigned still_count;
     double sums[3], squares[3];
     float bias[3], heading, display_heading;
+    float level_x, level_y;
+    int still_ms;
+    chart_cal_reason_t reason;
+    bool rejected; /* Set only by the call whose completed window failed the gate. */
 } chart_integrator_t;
 
 float chart_wrap180(float degrees);
@@ -64,6 +81,11 @@ bool chart_record_signal(chart_model_t *model, chart_signal_event_t event, int64
 void chart_integrator_reset(chart_integrator_t *integrator);
 bool chart_integrate(chart_integrator_t *integrator, int64_t now,
                      const float gyro[3], const float accel[3], float *tilt);
+/* Exact yaw rate about world up, in degrees/s, for a measured body-frame
+ * angular velocity and specific force. Mount agnostic: no configured axis. */
+float chart_yaw_rate(const float gyro[3], const float bias[3], const float accel[3]);
+const char *chart_cal_reason_text(chart_cal_reason_t reason);
+const char *chart_fatal_text(chart_fatal_t fatal);
 
 /* Pure RGB565 renderer shared by firmware and the host simulation. */
 typedef struct { uint8_t bits[CHART_DIRTY_BYTES]; } chart_dirty_mask_t;

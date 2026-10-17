@@ -16,6 +16,33 @@ static void sample(float angle,int rssi)
     assert(chart_record_signal(&model,(chart_signal_event_t){clock_us,rssi,true},clock_us));
 }
 
+/* The power-on flow: a quiet level window is accepted once and remembered; a
+ * disturbed window is rejected and the guidance repeats. No path invents a pose. */
+static void boot_guidance(void)
+{
+    chart_model_t m;
+    chart_integrator_t i;
+    chart_integrator_reset(&i);
+    chart_init(&m,IMU_SIM_RSSI,1000000);
+    assert(m.pose_status==CHART_CALIBRATING && m.fatal==CHART_FATAL_NONE);
+
+    /* Moving during the window restarts it, so the countdown never completes. */
+    float tilt,gyro[3]={0,0,0},accel[3]={0,0,1};
+    for (int j=0;j<200;++j) {
+        gyro[2]=j%2 ? 4.0f : -4.0f;
+        assert(!chart_integrate(&i,1000000+j*10000,gyro,accel,&tilt));
+        assert(!i.rejected); /* Motion restarts the countdown; it is not a gate failure. */
+    }
+    assert(i.reason==CHART_CAL_MOTION && i.still_ms==0 && !i.calibrated);
+
+    /* Holding still and level completes it and zeroes the relative heading. */
+    gyro[2]=0.05f;
+    for (int j=0;j<320;++j) chart_integrate(&i,3000000+j*10000,gyro,accel,&tilt);
+    assert(i.calibrated && i.reason==CHART_CAL_OK && i.heading==0);
+    assert(m.fatal==CHART_FATAL_NONE);
+    puts("PASS: boot guidance restarts on motion, completes when level and still, no pose invented");
+}
+
 static void geometry(void)
 {
     float x,y;
@@ -34,8 +61,8 @@ static void geometry(void)
     assert(chart_channel_frequency(6)==2437 && chart_channel_frequency(14)==2484);
     assert(chart_channel_frequency(36)==5180 && chart_channel_frequency(177)==5885);
     assert(chart_channel_frequency(35)==0 && chart_channel_frequency(15)==0);
-    assert(fabsf(chart_synthetic_rssi(60)+50)<0.001f);
-    assert(fabsf(chart_synthetic_rssi(420)+50)<0.001f);
+    assert(fabsf(chart_synthetic_rssi(CHART_SIM_PEAK_DEG)+50)<0.001f);
+    assert(fabsf(chart_synthetic_rssi(CHART_SIM_PEAK_DEG+360)+50)<0.001f);
     puts("PASS: opposite rotation, top alignment, wrap boundary, channel frequencies, fixed synthetic peak");
 }
 
@@ -90,14 +117,88 @@ static void calibration(void)
     for (int j=0;j<400;++j) assert(!chart_integrate(&i,1000000+j*10000,gyro,accel,&tilt));
     assert(!i.calibrated);
     gyro[2]=0.1f;
-    for (int j=0;j<260;++j) chart_integrate(&i,5000000+j*10000,gyro,accel,&tilt);
+    /* CHART_CALIBRATION_US is 3 s, so a valid window needs >=300 samples at 10 ms. */
+    for (int j=0;j<320;++j) chart_integrate(&i,5000000+j*10000,gyro,accel,&tilt);
     assert(i.calibrated && fabsf(i.bias[2]-0.1f)<0.001f);
     float before=i.heading;
     gyro[2]=0.3f;
-    for (int j=0;j<100;++j) assert(chart_integrate(&i,7600000+j*10000,gyro,accel,&tilt));
+    for (int j=0;j<100;++j) assert(chart_integrate(&i,8200000+j*10000,gyro,accel,&tilt));
     assert(fabsf((i.heading-before)-0.2f*CHART_IMU_YAW_SIGN)<0.001f);
     assert(!chart_integrate(&i,10000000,gyro,accel,&tilt) && !i.calibrated);
     puts("PASS: motion delays calibration, static bias estimate, slow rotation retained, stalled IMU forces recalibration");
+}
+
+static void window(chart_integrator_t *i,int64_t base,const float gyro[3],const float accel[3],int n)
+{
+    float tilt;
+    for (int j=0;j<n;++j) chart_integrate(i,base+j*10000,gyro,accel,&tilt);
+}
+
+static void calibration_gate(void)
+{
+    chart_integrator_t i;
+    const float level[]={0,0,1},quiet[]={0,0,0.1f};
+    /* A quiet, level window is accepted and reports its reason as OK. */
+    chart_integrator_reset(&i);
+    window(&i,1000000,quiet,level,320);
+    assert(i.calibrated && i.reason==CHART_CAL_OK);
+
+    /* Too few samples in a window that somehow elapsed: rejected. */
+    chart_integrator_reset(&i);
+    window(&i,1000000,quiet,level,10);
+    assert(!i.calibrated);
+
+    /* Noisy gyro exceeds the variance limit. */
+    chart_integrator_reset(&i);
+    float noisy[3]={0,0,0};
+    float tilt;
+    for (int j=0;j<320;++j) {
+        noisy[2]=(j%2 ? 1.4f : -1.4f); /* Variance 1.96: over the gate, under the stillness limit. */
+        chart_integrate(&i,1000000+j*10000,noisy,level,&tilt);
+        if (i.rejected) break;
+    }
+    assert(!i.calibrated && i.rejected && i.reason==CHART_CAL_NOISE);
+
+    /* A large steady offset is a bad zero, not a valid bias. */
+    chart_integrator_reset(&i);
+    const float drifting[]={0,0,9.0f};
+    window(&i,1000000,drifting,level,320);
+    assert(!i.calibrated);
+
+    /* A typical still MPU6050 offset (measured -2.4,-0.9,-0.7 dps on the bench)
+     * is above the stillness threshold but a valid bias: it must calibrate. */
+    chart_integrator_reset(&i);
+    const float offset[]={-2.4f,-0.9f,-0.7f};
+    window(&i,1000000,offset,level,320);
+    assert(i.calibrated && fabsf(i.bias[0]+2.4f)<0.001f);
+
+    /* Gravity out of range: free fall or a hard knock. */
+    chart_integrator_reset(&i);
+    const float fallen[]={0,0,0.2f};
+    window(&i,1000000,quiet,fallen,320);
+    assert(!i.calibrated);
+
+    /* Tilt is reported separately so the screen can say "level the device". */
+    chart_integrator_reset(&i);
+    const float tilted[]={0.5f,0,0.866f};
+    window(&i,1000000,quiet,tilted,320);
+    assert(!i.calibrated && i.reason==CHART_CAL_TILT);
+    puts("PASS: calibration gate accepts quiet level windows, rejects noise/bias/gravity/tilt, accepts a real off-zero bias");
+}
+
+static void gravity_yaw(void)
+{
+    /* psidot = dot(omega, a_hat) is exact at any tilt, unlike a fixed axis,
+     * so the mount orientation needs no configuration. */
+    const float zero[3]={0,0,0},level[]={0,0,1};
+    assert(fabsf(chart_yaw_rate((const float[]){0,0,10},zero,level)-10.0f)<0.001f);
+    const float tilted[]={0.342f,0,0.940f}; /* 20 degrees of pitch */
+    assert(fabsf(chart_yaw_rate((const float[]){0,0,10},zero,tilted)-9.397f)<0.01f);
+    /* Roll/pitch motion about a non-vertical axis contributes no yaw. */
+    assert(fabsf(chart_yaw_rate((const float[]){5,0,0},zero,level))<0.001f);
+    /* Degenerate gravity is reported as 0 rather than dividing by ~0. */
+    assert(chart_yaw_rate((const float[]){0,0,1},zero,(const float[]){0,0,0})==0);
+    puts("PASS: yaw rate projects onto measured gravity, exact at tilt, mount agnostic");
 }
 
 static uint16_t frame[320*320],tile[320*CHART_TILE_ROWS];
@@ -146,6 +247,29 @@ static void rendering(void)
     assert(memcmp(frame+fade_band*320,tile,sizeof(tile))!=0);
     assert(model.samples==count && model.bins[0].rssi==rssi);
     puts("PASS: native 320x320 raster, antenna and samples visible, unscanned gap blank, age fade does not mutate RSSI");
+}
+
+/* The guidance overlay appears and disappears with the pose state: a transition
+ * must not leave stale bubble pixels behind on the updated screen. */
+static void pose_transition(void)
+{
+    chart_model_t previous;
+    chart_dirty_mask_t mask;
+    chart_init(&model,IMU_SIM_RSSI,1000000);
+    model.pose_status=CHART_CALIBRATING;
+    model.level_x=0.4f; model.level_y=0.0f; model.still_ms=0;
+    chart_render_tile(&model,1000000,0,320,frame);
+    memcpy(&previous,&model,sizeof(model));
+    model.pose_status=CHART_READY;
+    model.level_x=model.level_y=0; model.still_ms=0;
+    chart_render_tile(&model,1000001,0,320,frame);
+    chart_mark_dirty(&previous,1000000,&model,1000001,&mask);
+    /* The bubble sat at x = centre + 0.4*34, which is inside the dial; without
+     * full-screen invalidation the old arc would survive the READY repaint. */
+    int covered=0;
+    for (unsigned b=0;b<sizeof(mask.bits);++b) covered+=__builtin_popcount(mask.bits[b]);
+    assert(covered==CHART_DIRTY_COLS*CHART_DIRTY_ROWS);
+    puts("PASS: calibration-to-ready transition invalidates the whole overlay area");
 }
 
 static void render_tiles(void)
@@ -328,7 +452,9 @@ static void endurance(void)
 
 int main(void)
 {
-    geometry(); buckets(); synchronization(); calibration(); boot_pattern(); rendering(); render_tiles(); render_rects(); glyph_coverage(); beacon_filter(); endurance();
+    geometry(); buckets(); synchronization(); boot_guidance(); calibration(); calibration_gate(); pose_transition();
+    gravity_yaw(); boot_pattern(); rendering(); render_tiles(); render_rects();
+    glyph_coverage(); beacon_filter(); endurance();
     printf("All host tests passed. model=%zu bytes, tile=%zu bytes\n",sizeof(model),sizeof(tile));
     return 0;
 }

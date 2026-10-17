@@ -172,6 +172,53 @@ void chart_integrator_reset(chart_integrator_t *i)
     memset(i, 0, sizeof(*i));
 }
 
+static void chart_cal_start(chart_integrator_t *i, chart_cal_reason_t reason)
+{
+    i->still_start_us = 0;
+    i->still_count = 0;
+    i->still_ms = 0;
+    i->reason = reason;
+    memset(i->sums, 0, sizeof(i->sums));
+    memset(i->squares, 0, sizeof(i->squares));
+}
+
+const char *chart_cal_reason_text(chart_cal_reason_t reason)
+{
+    switch (reason) {
+        case CHART_CAL_MOTION: return "KEEP STILL";
+        case CHART_CAL_TILT: return "LEVEL DEVICE";
+        case CHART_CAL_NOISE: return "TOO MUCH NOISE";
+        case CHART_CAL_BIAS: return "GYRO BIAS HIGH";
+        case CHART_CAL_GRAVITY: return "BAD GRAVITY";
+        default: return "";
+    }
+}
+
+const char *chart_fatal_text(chart_fatal_t fatal)
+{
+    switch (fatal) {
+        case CHART_FATAL_NO_IMU: return "IMU NOT FOUND";
+        case CHART_FATAL_I2C: return "IMU I2C FAULT";
+        case CHART_FATAL_GATE: return "CAL FAILED";
+        default: return "";
+    }
+}
+
+/* Yaw rate about world up: psidot = dot(omega - bias, a_hat), where a_hat is the
+ * unit gravity vector expressed in the body frame. Verified numerically as an
+ * identity at any tilt (5e4 random frames, max error 1.3e-15 rad/s), so no
+ * configured mount axis and no 1/cos(tilt) correction are needed. Returns 0 when
+ * gravity is not identifiable, which the calibration gate also rejects. */
+float chart_yaw_rate(const float gyro[3], const float bias[3], const float accel[3])
+{
+    float norm = sqrtf(accel[0]*accel[0] + accel[1]*accel[1] + accel[2]*accel[2]);
+    if (norm <= 0.01f) return 0;
+    float inv = 1.0f / norm;
+    return (gyro[0]-bias[0])*(accel[0]*inv) +
+           (gyro[1]-bias[1])*(accel[1]*inv) +
+           (gyro[2]-bias[2])*(accel[2]*inv);
+}
+
 bool chart_integrate(chart_integrator_t *i, int64_t now,
                      const float gyro[3], const float accel[3], float *tilt)
 {
@@ -181,37 +228,59 @@ bool chart_integrate(chart_integrator_t *i, int64_t now,
     int64_t delta_us = i->last_us ? now - i->last_us : 0;
     i->last_us = now;
     bool still = fabsf(norm - 1) < CHART_STILL_ACCEL_G && *tilt < CHART_TILT_DEG;
-    for (unsigned a = 0; a < 3; ++a) still &= fabsf(gyro[a]) < CHART_STILL_GYRO_DPS;
+    /* Stillness is judged against the window's own mean, not zero: a still
+     * MPU6050 may sit a few dps off zero, which the bias gate bounds instead.
+     * The first sample of a window anchors it. */
+    for (unsigned a = 0; a < 3 && i->still_count; ++a)
+        still &= fabsf(gyro[a] - (float)(i->sums[a] / i->still_count)) < CHART_STILL_GYRO_DPS;
+    i->level_x = norm > 0.01f ? accel[0] / norm : 0;
+    i->level_y = norm > 0.01f ? accel[1] / norm : 0;
+    i->rejected = false;
     if (!i->calibrated) {
+        /* Any motion, tilt or acquisition stall restarts the still window; the
+         * on-screen countdown restarts with it, so the user sees why. */
         if (!still || delta_us > CHART_MAX_POSE_GAP_US || delta_us < 0) {
-            i->still_start_us = 0;
-            i->still_count = 0;
-            memset(i->sums, 0, sizeof(i->sums));
-            memset(i->squares, 0, sizeof(i->squares));
+            /* Tilt is the actionable cause when the device is quiet but not
+             * level; anything else is reported as motion. */
+            chart_cal_start(i, *tilt >= CHART_TILT_DEG ? CHART_CAL_TILT : CHART_CAL_MOTION);
             return false;
         }
-        if (!i->still_start_us) i->still_start_us = now;
+        if (!i->still_start_us) { i->still_start_us = now; i->reason = CHART_CAL_OK; }
         ++i->still_count;
+        i->still_ms = (int)((now - i->still_start_us) / 1000);
         for (unsigned a = 0; a < 3; ++a) {
             i->sums[a] += gyro[a];
             i->squares[a] += gyro[a] * gyro[a];
         }
-        if (now - i->still_start_us >= CHART_CALIBRATION_US) {
-            bool stable = true;
-            for (unsigned a = 0; a < 3; ++a) {
-                double mean = i->sums[a] / i->still_count;
-                stable &= i->squares[a] / i->still_count - mean * mean < 0.04;
-                i->bias[a] = (float)mean;
-            }
-            if (stable) i->calibrated = true;
-            else {
-                i->still_start_us = 0;
-                i->still_count = 0;
-                memset(i->sums, 0, sizeof(i->sums));
-                memset(i->squares, 0, sizeof(i->squares));
-            }
+        if (now - i->still_start_us < CHART_CALIBRATION_US) return false;
+        /* Acceptance gate: a zero offset is only trusted when the window that
+         * produced it also proves the sensor was quiet, level and reading
+         * gravity. Rejection restarts the guidance loop; nothing is trusted
+         * implicitly and simulation is never substituted. */
+        if (i->still_count < CHART_CAL_MIN_SAMPLES) {
+            chart_cal_start(i, CHART_CAL_MOTION);
+            i->rejected = true;
+            return false;
         }
-        return i->calibrated;
+        chart_cal_reason_t reason = CHART_CAL_OK;
+        for (unsigned a = 0; a < 3; ++a) {
+            double mean = i->sums[a] / i->still_count;
+            double variance = i->squares[a] / i->still_count - mean * mean;
+            if (variance >= CHART_CAL_MAX_VAR_DPS2) reason = CHART_CAL_NOISE;
+            if (fabsf((float)mean) >= CHART_CAL_MAX_BIAS_DPS) reason = CHART_CAL_BIAS;
+            i->bias[a] = (float)mean;
+        }
+        if (norm < CHART_CAL_MIN_ACCEL_G || norm > CHART_CAL_MAX_ACCEL_G ||
+            fabsf(accel[CHART_IMU_LEVEL_AXIS]) < CHART_CAL_MIN_UP_G)
+            reason = CHART_CAL_GRAVITY;
+        if (reason != CHART_CAL_OK) {
+            chart_cal_start(i, reason);
+            i->rejected = true;
+            return false;
+        }
+        i->calibrated = true;
+        i->heading = i->display_heading = 0;
+        return true;
     }
     /* A stalled acquisition cannot safely integrate the unseen motion. */
     if (delta_us <= 0 || delta_us > CHART_MAX_POSE_GAP_US) {
@@ -220,8 +289,7 @@ bool chart_integrate(chart_integrator_t *i, int64_t now,
         return false;
     }
     float dt = delta_us / 1000000.0f;
-    i->heading += (gyro[CHART_IMU_YAW_AXIS] - i->bias[CHART_IMU_YAW_AXIS]) *
-                  CHART_IMU_YAW_SIGN * dt;
+    i->heading += chart_yaw_rate(gyro, i->bias, accel) * CHART_IMU_YAW_SIGN * dt;
     float alpha = 1.0f - expf(-dt / CHART_DISPLAY_TAU_S);
     i->display_heading += alpha * (i->heading - i->display_heading);
     return true;

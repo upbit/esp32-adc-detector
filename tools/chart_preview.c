@@ -28,7 +28,7 @@ int main(int argc,char **argv)
     chart_init(&model,UI_SIM,1000000);
     chart_render_init();
     int64_t now=1000000;
-    /* Scan a real synthetic path through +60, then reverse with signal paused. */
+    /* Scan a real synthetic path through the synthetic peak, then reverse with signal paused. */
     unsigned frame=0;
     for (int step=0;step<=150;++step) {
         now+=100000;
@@ -73,6 +73,32 @@ int main(int argc,char **argv)
         {"state-missing",CHART_READY,CHART_TARGET_MISSING,0,LIVE_WIFI},
         {"state-search",CHART_READY,CHART_TARGET_SEARCH,0,LIVE_WIFI},
     };
+    {   /* Calibration guidance: off-centre bubble, then centred with countdown. */
+        model.pose_status=CHART_CALIBRATING; model.tilt_deg=0; model.mode=IMU_SIM_RSSI;
+        model.fatal=CHART_FATAL_NONE; model.cal_reason=CHART_CAL_OK;
+        model.level_x=0.34f; model.level_y=-0.22f; model.still_ms=0;
+        char path[512];
+        snprintf(path,sizeof(path),"%s/case-cal-bubble.ppm",directory);
+        write_frame(path,base);
+        model.level_x=0.02f; model.level_y=0.01f; model.still_ms=1800;
+        snprintf(path,sizeof(path),"%s/case-cal-countdown.ppm",directory);
+        write_frame(path,base);
+        model.cal_reason=CHART_CAL_TILT; model.still_ms=0;
+        snprintf(path,sizeof(path),"%s/case-cal-level.ppm",directory);
+        write_frame(path,base);
+        model.level_x=model.level_y=0; model.cal_reason=CHART_CAL_OK;
+    }
+    {   /* Unrecoverable: red background, English reason, layout retained. */
+        model.pose_status=CHART_IMU_ERROR; model.fatal=CHART_FATAL_NO_IMU;
+        model.gate_retries=0;
+        char path[512];
+        snprintf(path,sizeof(path),"%s/case-fatal-no-imu.ppm",directory);
+        write_frame(path,base);
+        model.fatal=CHART_FATAL_GATE; model.gate_retries=8;
+        snprintf(path,sizeof(path),"%s/case-fatal-gate.ppm",directory);
+        write_frame(path,base);
+        model.fatal=CHART_FATAL_NONE; model.pose_status=CHART_READY;
+    }
     for (unsigned s=0;s<sizeof(states)/sizeof(*states);++s) {
         model.pose_status=states[s].pose; model.target_status=states[s].target;
         model.tilt_deg=states[s].tilt; model.mode=states[s].mode;

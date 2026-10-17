@@ -78,24 +78,37 @@
 /* Noto Sans SC hhea ascender is 1.16 em; used to align different sizes on one baseline. */
 #define CHART_ASCENT(size) (((size)*116+50)/100)
 
-#define CHART_IMU_SDA 23
-#define CHART_IMU_SCL 24
+#define CHART_IMU_SDA 4
+#define CHART_IMU_SCL 5
 #define CHART_IMU_ADDRESS 0x68
 #define CHART_IMU_I2C_HZ 100000
 #define CHART_IMU_HZ 100
 #define CHART_IMU_GYRO_FS 0 /* 0=250, 1=500, 2=1000, 3=2000 degrees/s. */
 #define CHART_IMU_DLPF 3 /* MPU6050: ~42 Hz gyro bandwidth. */
-#define CHART_IMU_YAW_AXIS 2 /* 0=X, 1=Y, 2=Z; verify installation. */
-#define CHART_IMU_YAW_SIGN (-1) /* Clockwise from above is positive. Verify physically. */
-#define CHART_IMU_LEVEL_AXIS 2
-#define CHART_CALIBRATION_US 2500000
-#define CHART_STILL_GYRO_DPS 1.5f
+#define CHART_IMU_YAW_SIGN (-1) /* Clockwise from above is positive; bench-verified with the chip face up. */
+#define CHART_IMU_LEVEL_AXIS 2 /* Only used for the tilt readout and the level gate. */
+#define CHART_CALIBRATION_US 3000000
+#define CHART_STILL_GYRO_DPS 3.0f /* Deviation from the window mean; handheld tremor is ~1-2 dps. */
 #define CHART_STILL_ACCEL_G 0.04f
 #define CHART_TILT_DEG 20.0f
 #define CHART_DISPLAY_TAU_S 0.10f
 #define CHART_MAX_POSE_GAP_US 100000
 
-#define CHART_DEFAULT_MODE 0 /* 0=UI_SIM, 1=IMU_SIM_RSSI, 2=LIVE_WIFI. */
+/* Power-on calibration acceptance gate. `psidot = dot(gyro - bias, a_hat)` is
+ * exact at any tilt, so the yaw axis comes from measured gravity rather than a
+ * configured mount guess; a_hat is the unit gravity vector in the body frame.
+ * The gate rejects a calibration instead of trusting it; failure repeats the
+ * on-screen guidance (see CHART_MAX_GATE_RETRIES) and never falls back to
+ * simulation. */
+#define CHART_CAL_MIN_SAMPLES 30 /* Reject a window that barely started. */
+#define CHART_CAL_MAX_BIAS_DPS 5.0f /* A still MPU6050 is well under 1 dps. */
+#define CHART_CAL_MAX_VAR_DPS2 1.5f /* Per-axis gyro variance; a steady hand measured 0.5-1.0 dps^2. */
+#define CHART_CAL_MIN_ACCEL_G 0.85f
+#define CHART_CAL_MAX_ACCEL_G 1.15f
+#define CHART_CAL_MIN_UP_G 0.9f /* |a| after normalising; keeps a_hat identifiable. */
+#define CHART_MAX_GATE_RETRIES 8 /* Recoverable failures before the fatal red screen. */
+
+#define CHART_DEFAULT_MODE 1 /* 1=IMU_SIM_RSSI, 2=LIVE_WIFI; 0=UI_SIM is host-only. */
 #ifndef CHART_TARGET_SSID
 #define CHART_TARGET_SSID "" /* Fill before LIVE_WIFI; empty is deliberately invalid. */
 #endif
@@ -103,7 +116,7 @@
 #define CHART_WIFI_COUNTRY "CN" /* Set to the actual operating jurisdiction. */
 #define CHART_WIFI_QUEUE_LENGTH 64
 #define CHART_SIM_NAME "CAM_02"
-#define CHART_SIM_PEAK_DEG 60.0f
+#define CHART_SIM_PEAK_DEG 0.0f /* At the calibrated start: the amber peak marks the original heading for drift checks. */
 #define CHART_SIM_SPEED_DPS 15.0f
 #define CHART_SIM_PERIOD_US 100000
 #define CHART_SIM_NOISE_DB 0.0f /* Deterministic by default; optional +/- noise. */

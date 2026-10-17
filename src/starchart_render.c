@@ -9,6 +9,8 @@ typedef struct { unsigned char r, g, b; } color_t;
 static const color_t bg = {4,18,30}, grid = {27,49,66}, white = {231,242,248},
     muted = {154,181,201}, cyan = {37,223,237}, dark = {20,97,115},
     amber = {255,196,90}, history = {100,114,131};
+/* Unrecoverable faults tint the whole panel; nothing else about the layout moves. */
+static const color_t bg_fatal = {64,10,14}, fatal_ink = {255,120,110};
 static float sine[720], cosine[720];
 /* Q6 distances for discs up to CHART_DISC_MAX_R px; widest halo is (4+7)+6 wide. */
 #define CHART_DISC_MAX_R 12
@@ -355,9 +357,15 @@ static int display_angle(const chart_model_t *m)
 
 static const char *display_status(const chart_model_t *m,int64_t now)
 {
-    if (m->pose_status==CHART_IMU_ERROR) return "IMU 错误";
-    if (m->pose_status==CHART_CALIBRATING) return "静置校准";
-    if (m->tilt_deg>CHART_TILT_DEG) return "保持水平";
+    /* Guidance text is English and numeric on purpose: the baked font has 84 CJK
+     * glyphs and no spare codepoints for new Chinese strings. */
+    if (m->fatal!=CHART_FATAL_NONE) return chart_fatal_text(m->fatal);
+    if (m->pose_status==CHART_IMU_ERROR) return "IMU ERROR";
+    if (m->pose_status==CHART_CALIBRATING) {
+        if (m->cal_reason!=CHART_CAL_OK) return chart_cal_reason_text(m->cal_reason);
+        return m->still_ms>0 ? "HOLD STILL" : "LEVEL DEVICE";
+    }
+    if (m->tilt_deg>CHART_TILT_DEG) return "LEVEL DEVICE";
     if (m->target_status==CHART_WIFI_ERROR) return "Wi-Fi 错误";
     if (m->target_status==CHART_TARGET_MISSING) return "未发现信号";
     if (stale_signal(m,now) || m->target_status==CHART_TARGET_SEARCH) return "等待信号";
@@ -371,8 +379,63 @@ static float bin_span(const chart_model_t *m,int i)
     return span<0 || span>20 ? 0 : span;
 }
 
+static bool is_fatal(const chart_model_t *m) { return m->fatal != CHART_FATAL_NONE; }
+
+/* Calibration guidance: a bubble driven by the horizontal gravity components
+ * plus a countdown around the hub. Both are drawn from the model only, so the
+ * dirty mask can see them change. */
+static void render_calibration_overlay(const chart_model_t *m,int64_t now,uint64_t elements)
+{
+    const float span = 34.0f; /* Bubble travel from hub to the target ring. */
+    const float target = 10.0f; /* ~17 deg of tilt: holdable by hand, inside the 20 deg gate. */
+    float bx = CHART_CENTER_X + m->level_x * span;
+    float by = CHART_CENTER_Y + m->level_y * span;
+    (void)now;
+    arc(0,360,span,1.0f,mix(grid,muted,0.35f));
+    disc(CHART_CENTER_X,CHART_CENTER_Y,2.0f,mix(grid,muted,0.5f));
+    float dx=bx-CHART_CENTER_X, dy=by-CHART_CENTER_Y;
+    float dist=sqrtf(dx*dx+dy*dy);
+    bool centred = dist <= target;
+    arc(0,360,target,1.0f,centred ? cyan : mix(grid,muted,0.6f));
+    color_t ink = centred ? cyan : amber;
+    disc(bx,by,4.0f,mix(bg,ink,0.22f));
+    disc(bx,by,2.4f,ink);
+    if (m->still_ms > 0 && centred) {
+        /* Countdown ring fills clockwise; the whole seconds remaining take the
+         * turn-angle slot below the hub, so nothing overlaps. */
+        float total=(float)(CHART_CALIBRATION_US/1000);
+        float done=fminf(1.0f,(float)m->still_ms/total);
+        if (done>0) arc(-90.0f,-90.0f+360.0f*done,span+7.0f,2.5f,cyan);
+    }
+    if (elements&ELEMENT(ELEMENT_ANGLE)) {
+        char label[8];
+        int remaining=(int)((CHART_CALIBRATION_US/1000 - m->still_ms + 999)/1000);
+        snprintf(label,sizeof(label),"%d",remaining>0 ? remaining : 1);
+        text(label,CHART_CENTER_X-text_width(label,CHART_FONT_ANGLE)/2,206,
+             CHART_FONT_ANGLE,centred ? cyan : muted,320);
+    }
+}
+
+static void render_fatal(const chart_model_t *m)
+{
+    const char *reason=chart_fatal_text(m->fatal);
+    centered(reason,CHART_CENTER_Y-CHART_FONT_NAME,CHART_FONT_NAME,fatal_ink);
+    centered("CHECK WIRING",CHART_CENTER_Y+8,CHART_FONT_LABEL,muted);
+    char retry[24];
+    snprintf(retry,sizeof(retry),"RETRY %d",m->gate_retries);
+    centered(retry,CHART_CENTER_Y+30,CHART_FONT_TICK,mix(bg_fatal,muted,0.6f));
+}
+
 static void render_scene(const chart_model_t *m,int64_t now,uint64_t elements)
 {
+    /* A fatal fault keeps the frame, header rows and status line so the screen is
+     * never blank, and replaces only the dial with the reason. */
+    if (is_fatal(m)) {
+        if (elements&ELEMENT(ELEMENT_STATUS))
+            centered(display_status(m,now),297,CHART_FONT_STATUS,muted);
+        render_fatal(m);
+        return;
+    }
     if (elements&ELEMENT(ELEMENT_STATIC)) {
         /* Inner grid rings scale with the outer ring: 0.26 and 0.47 and 0.68 of R. */
         for (int r=29;r<=86;r+=r==29 ? 28 : 29) {
@@ -495,7 +558,7 @@ static void render_scene(const chart_model_t *m,int64_t now,uint64_t elements)
     }
     if ((elements&ELEMENT(ELEMENT_SIM)) && m->mode!=LIVE_WIFI)
         text("模拟",12,54,CHART_FONT_LABEL,amber,80);
-    if (elements&ELEMENT(ELEMENT_ANGLE)) {
+    if ((elements&ELEMENT(ELEMENT_ANGLE)) && m->pose_status!=CHART_CALIBRATING) {
         int angle=display_angle(m);
         snprintf(label,sizeof(label),"%+04d°",angle);
         /* Turn angle stays inside the dial; the prefix centres on the number's ink. */
@@ -538,6 +601,7 @@ static void render_scene(const chart_model_t *m,int64_t now,uint64_t elements)
     }
     if ((elements&ELEMENT(ELEMENT_COVERAGE)) && m->coverage)
         line(67,295,67+186.0f*m->coverage/CHART_BINS,295,3,cyan);
+    if (m->pose_status==CHART_CALIBRATING) render_calibration_overlay(m,now,elements);
     if (elements&ELEMENT(ELEMENT_STATUS)) centered(display_status(m,now),297,CHART_FONT_STATUS,muted);
 }
 
@@ -545,7 +609,8 @@ void chart_render_rect(const chart_model_t *m,int64_t now,int x,int y,int width,
 {
     if (x<0 || x>=320 || y<0 || y>=320 || width<=0 || width>320-x || rows<=0 || rows>320-y) return;
     set_tile(buffer,x,y,width,rows);
-    for (int j=0;j<width*rows;++j) tile[j]=pack(bg);
+    uint16_t fill=pack(is_fatal(m) ? bg_fatal : bg);
+    for (int j=0;j<width*rows;++j) tile[j]=fill;
     render_scene(m,now,(ELEMENT(ELEMENT_COUNT)-1));
 }
 
@@ -563,7 +628,19 @@ void chart_mark_dirty(const chart_model_t *previous,int64_t previous_time,
                       const chart_model_t *current,int64_t current_time,chart_dirty_mask_t *mask)
 {
     memset(mask,0,sizeof(*mask));
-    if (!previous || previous->mode!=current->mode || previous->epoch_us!=current->epoch_us) {
+    /* A fault or a full-screen transition repaints everything: the background
+     * colour itself changes, so per-element comparison cannot see it. */
+    if (!previous || previous->mode!=current->mode || previous->epoch_us!=current->epoch_us ||
+        previous->fatal!=current->fatal) {
+        memset(mask->bits,255,sizeof(mask->bits));
+        return;
+    }
+    /* Guidance bubble, countdown and retry counter all live inside the dial, and
+     * the pose state toggles the overlay itself, so any of these repaints it. */
+    if (previous->pose_status!=current->pose_status ||
+        previous->cal_reason!=current->cal_reason || previous->gate_retries!=current->gate_retries ||
+        previous->level_x!=current->level_x || previous->level_y!=current->level_y ||
+        previous->still_ms!=current->still_ms) {
         memset(mask->bits,255,sizeof(mask->bits));
         return;
     }

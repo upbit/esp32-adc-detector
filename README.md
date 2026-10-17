@@ -66,21 +66,21 @@ GPIO7、9、6、10 都在左侧相邻区域，接线比较集中。MOSI 使用 G
 
 | MPU6050 | C5 接法 | 说明 |
 |---|---|---|
-| SDA | **右侧 GPIO23** | I²C 数据 |
-| SCL | **右侧 GPIO24** | I²C 时钟 |
+| SDA | **右侧 GPIO4** | I²C 数据 |
+| SCL | **右侧 GPIO5** | I²C 时钟 |
 | GND | **右侧顶部 GND** | 地 |
 | VCC | 共用左侧 3V3 电源分支 | 前提是模块支持 3.3 V 输入 |
 | AD0 | 接 MPU6050 自身的 GND | 固定地址为 `0x68` |
-| INT | 可选接右侧 GPIO5 | 初版轮询可不接 |
+| INT | 不接 | 当前采用轮询，GPIO5 已用于 SCL |
 | XDA、XCL | 不接 | 当前不使用辅助 I²C |
 
-GPIO23、24 在右侧相邻位置，适合把 MPU6050 放在开发板右边。
+GPIO4、5 在右侧下半部相邻位置，位于 GPIO27 下方、GPIO28 上方。2026-10-17 用户已将 MPU6050 信号线从 GPIO23、24 改接到这组引脚。
 
 最终软件配置：
 
 ```text
 屏幕：MOSI=7，SCK=6，CS=10，DC=9，BL=GPIO0（已接，软件不驱动）
-MPU6050：SDA=23，SCL=24，INT可选=5
+MPU6050：SDA=4，SCL=5，INT不接
 ```
 
 屏幕未引出已确认的 RESET 脚，初始化时可先尝试 ST7796 的软件复位；无标记脚继续留空，不能擅自接成 RESET。
@@ -102,19 +102,25 @@ pio device monitor --port /dev/cu.usbmodem101
 
 串口以 `pio device list` 为准。
 
-默认 `UI_SIM`，屏幕上明确显示「模拟」。所有 GPIO、显示窗口、IMU 轴、模式和目标 AP 集中在 `include/starchart_config.h`。切换真实模式前填写 `CHART_TARGET_SSID`；可选 BSSID 防止同名 AP 混淆。
+默认 `IMU_SIM_RSSI`：真实 MPU6050 + 合成 RSSI（虚拟强峰 0°，即校准时的初始朝向）。上电进入基准校准引导：气泡对准圆心并静置 3 秒后进入星盘；校验不通过则重复引导，`CHART_MAX_GATE_RETRIES` 次后进入红色错误屏，不会回退到模拟姿态。`mode ui` / `angle` / `auto` 已从固件移除；`mode imu` 保留屏幕「模拟」角标（RSSI 仍是合成的），`mode live` 才使用真实 Beacon。所有 GPIO、显示窗口、IMU 轴、模式和目标 AP 集中在 `include/starchart_config.h`。
 
 ```text
 help          查看串口命令
-mode ui       自动姿态 + 合成 RSSI
-mode imu      MPU6050 + 合成 RSSI，静置 2.5 秒校准
+mode imu      MPU6050 + 合成 RSSI（默认），3 秒静置校准
 mode live     MPU6050 + 固定 BSSID 的 Beacon RSSI
-angle 30      模拟姿态设为 +30°，停止自动旋转
 signal off    停止合成采样，盘仍跟随姿态
 zero          重新置零并清空本轮
 cal           重新初始化 MPU6050、校准并清空本轮
-stats         查看角度、覆盖、包数及时间对齐统计
+imu           输出原始陀螺/加速度与投影偏航率（确认轴与符号）
+stats         查看角度、覆盖、包数、校准状态及失败原因
 ```
+
+校准引导与错误屏：
+
+- 屏幕中心显示气泡，由实测重力水平分量驱动；气泡落在圆心 5 px 内开始 3 s 倒计时环，转角位置显示剩余秒数。
+- 校验门逐项检查陀螺零偏幅值、逐轴方差、重力幅值与方向可辨识性；未通过则显示英文原因（`KEEP STILL` / `LEVEL DEVICE` / `TOO MUCH NOISE` / `GYRO BIAS HIGH` / `BAD GRAVITY`）并重复引导。
+- 不可恢复错误（IMU 未找到、I²C 故障、连续 8 次校验失败）整屏变为暗红底色，中心英文提示原因，布局保留不整屏空白。
+- 偏航率用 `dot(ω−bias, â)` 对实测重力方向投影，安装轴不需要配置；倾斜 ≤20° 时仍精确。
 
 主机验证与预览生成：
 
