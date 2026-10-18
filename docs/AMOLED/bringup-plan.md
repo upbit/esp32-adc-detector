@@ -250,3 +250,17 @@ sequenceDiagram
 QSPI 10 MHz、驱动能力 0：用户确认竖条和渐变都显示正常。
 
 现象归类为地弹（同步开关噪声）。屏幕 6 针 QSPI 插座没有 GND 针，数据线的回流只能走 4 针线里的那一根 GND，回路面积大。规避措施（线不能缩短时）：两束线贴在一起、GND 贴着信号线走；在面包板上给 SCK/D0–D3 串 22–33 Ω 电阻；找出能稳定工作的最高频率；UI 尽量局部刷新。
+
+### 现象的资料依据
+
+- **地弹（ground bounce）/ 同步开关噪声（SSN，Simultaneous Switching Noise）**：多个输出同时跳变时，瞬态电流流过共用地回路的电感，产生 V = L·di/dt 的电压。接收端看到的地电位因此偏移，逻辑电平被误判。同时跳变的输出越多、边沿越陡，偏移越大。[Wikipedia: Ground bounce](https://en.wikipedia.org/wiki/Ground_bounce) 列出的对策有：低阻抗地连接、足够的旁路电容、在每个开关输出上串联 10–30 Ω 电阻。TI 应用报告 [SCBA015A](https://www.ti.com/lit/an/scba015a/scba015a.pdf) 也指出："If several signal lines are switched simultaneously, considerable current fluctuations may occur."
+- **乐鑫 [ESP32-S3 PCB 布局指南](https://docs.espressif.com/projects/esp-hardware-design-guidelines/en/latest/esp32s3/pcb-layout-design.html)** 对 SPI（Flash/PSRAM）的要求："add ground copper and ground vias around the clock and data traces of SPI separately"，并建议在靠近芯片处串联电阻，第二层保持完整的 GND 平面。该指南没有针对 LCD 的单独要求，但原理相同：高速 SPI 时钟线和数据线需要紧贴的回流地。
+- **CO5300 手册 p.107**：QSPI 写周期 ≥ 20 ns，SCL 高、低电平各 ≥ 6.5 ns，边沿 ≤ 3.5 ns，数据建立和保持时间各 ≥ 4 ns。
+
+与本项目的对应关系：1 根或 2 根数据线翻转时正常，3 根以上同时翻转就出错（同时跳变的数量）；降低驱动能力后有改善（di/dt 变小）；降频无效（噪声由边沿决定，与频率无关）；换成靠近信号线的 GND 后恢复（回路电感变小）。屏幕的 QSPI 插座没有 GND 针，这是回路大的结构性原因。
+
+### 接线加固与 20 MHz
+
+用户把两束线并拢绑紧，并加了一根屏蔽地线：一端接 ESP32 远离 USB 的 GND，另一端悬空，绑在 QSPI 线束中间。说明：一端悬空的地线不承载回流电流，主要起静电屏蔽、减少串扰的作用；如果另一端也接到屏幕侧 GND，才能分担回流。
+
+QSPI 改为 20 MHz（驱动能力 0）。40 秒串口日志无错误；FULL 模式稳定在 21.7 FPS / 7.16 MB/s，帧耗时 41.7 ms；PARTIAL 约 62 FPS。**用户确认：启动渐变和 FULL 模式画面均正常。**

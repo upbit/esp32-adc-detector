@@ -6,7 +6,7 @@
 
 ## 硬件与接线
 
-已通过 esptool 识别 ESP32-S3 rev v0.2、8 MB Quad Flash、8 MB Embedded PSRAM、40 MHz 晶振。屏幕为 368×448、CO5300，使用 **QSPI、RGB565、DMA 双缓冲**（当前 10 MHz 已验证，SPI mode 3，使用卖家初始化序列；40 MHz 在杜邦线上未通过，正在逐档提速）。采用 [Espressif CO5300 2.2.0 驱动](https://components.espressif.com/components/espressif/esp_lcd_co5300/versions/2.2.0/readme)。
+已通过 esptool 识别 ESP32-S3 rev v0.2、8 MB Quad Flash、8 MB Embedded PSRAM、40 MHz 晶振。屏幕为 368×448、CO5300，使用 **QSPI、RGB565、DMA 双缓冲**（当前 20 MHz 已验证，SPI mode 3，使用卖家初始化序列；40 MHz 在杜邦线上未通过，正在逐档提速）。采用 [Espressif CO5300 2.2.0 驱动](https://components.espressif.com/components/espressif/esp_lcd_co5300/versions/2.2.0/readme)。
 
 开发板排针依据 [ESP32-S3_R8N8_pinlayout.png](docs/ESP32-S3_R8N8_pinlayout.png) 核对。**以下为新接线，替换上一版 GPIO6/7/15/16/17/18 分配。** QSPI 使用 SPI2 原生 IO_MUX 引脚 GPIO9–14，六根信号线集中在左侧连续排针。
 
@@ -38,10 +38,26 @@ RST     ← 不接
 3V3     ← 屏幕 3V3（三个 3V3 针脚任选一个）
 3V3
 3V3
-GND     ← 屏幕 GND
+GND     ← 不要用：靠近 USB，回流路径远离 QSPI 线束
 ```
 
-QSPI 信号线尽量短，建议先控制在约 10 cm 以内；连接端只按丝印辨认，勿凭线材颜色判断。背面插座方向见 [AMOLED-pinout.jpg](docs/AMOLED/AMOLED-pinout.jpg)。RST/TE/EN 测试点暂不接，使用板上上电复位和 CO5300 软件复位。引脚和屏幕参数统一定义于 [src/board.h](src/board.h)。断电调整接线。**2026-10-18 已点亮。** 之前出现白块/黑线后黑屏，根因是地回路：屏幕 GND 原先接在底部 GND，四根数据线同时翻转时地弹导致 QSPI 像素写入出错，单根线、单线 SPI 都正常。把屏幕 GND 改接到靠近 GPIO7–14 的 GND 后恢复正常。另外 SCK/D0–D3 的驱动能力已降到 0（`LCD_DRIVE_CAP`），用来减缓杜邦线上的信号边沿。排查过程见 [bringup-plan.md](docs/AMOLED/bringup-plan.md)。
+屏幕 GND 接**左侧 GPIO6 与 GPIO7 之间的 GND**（远离 USB、紧挨 QSPI 信号线）。
+
+QSPI 信号线尽量短，建议先控制在约 10 cm 以内；连接端只按丝印辨认，勿凭线材颜色判断。背面插座方向见 [AMOLED-pinout.jpg](docs/AMOLED/AMOLED-pinout.jpg)。RST/TE/EN 测试点暂不接，使用板上上电复位和 CO5300 软件复位。引脚和屏幕参数统一定义于 [src/board.h](src/board.h)。断电调整接线。**2026-10-18 已点亮。** 之前出现白块/黑线后黑屏，根因是地回路：屏幕 GND 原先接在 USB 旁边的底部 GND，四根数据线同时翻转时产生地弹，导致 QSPI 像素写入出错，而单根线翻转、单线 SPI 都正常。屏幕 GND 改接到 GPIO7 旁边的 GND 后恢复正常。SCK/D0–D3 驱动能力为 0（`LCD_DRIVE_CAP`）。排查过程见 [bringup-plan.md](docs/AMOLED/bringup-plan.md)。
+
+### 接线注意事项（QSPI 信号完整性）
+
+屏幕的 6 针 QSPI 插座（D3/D2/D1/D0/SCK/CS）**没有 GND 针**，数据线的回流只能走 4 针插座里的那一根 GND。MX1.25 转杜邦线约 8 cm 且不能缩短，所以：
+
+1. **GND 选远离 USB、紧挨 GPIO7–14 的那个**（左侧 GPIO6 与 GPIO7 之间）。不要用 USB 旁边的底部 GND，最初的黑屏就是这个原因。
+2. **两束线全程并拢绑紧**：6 针 QSPI 线和 4 针电源/触摸线（GND/3V3/SCL/SDA）每隔 1–2 cm 用胶带或扎带固定，两端分叉处尽量贴近插座，不要张开成大的 Y 形。
+3. **3V3 和 GND 成对贴紧**，一起靠着 QSPI 线束。
+4. **加一根屏蔽地线**：另接一根杜邦线，一端插 ESP32 远离 USB 的 GND，另一端悬空，绑在 QSPI 线束中间。它只起静电屏蔽、减少串扰的作用，不承载回流电流。如果能把另一端也接到屏幕侧的 GND，效果更好。
+5. 不要把多余线长盘成圈；线束远离 USB 线和板载天线；不需要把线拧成双绞。
+6. 后续可选：在 ESP32 端给 SCK/D0–D3 各串一个 22–33 Ω 电阻（可用面包板转接），进一步抑制地弹和振铃。
+
+改接线前先断电。接线改动后，先看启动检测画面里的渐变是否平滑，再看 FULL 模式。
+
 
 ### 下一步：触摸接线
 
@@ -83,6 +99,6 @@ pio device monitor -p /dev/cu.usbmodem1401 -b 115200
 
 本机若 `pio` 不在 PATH，将其替换为 `/Users/gao/.platformio/penv/bin/pio`。串口路径会随 USB 连接变化，烧录前重新确认。固件输出位于 `.pio/build/esp32-s3-n8r8/firmware.bin`。
 
-启动日志应报告 PSRAM 为 8 MB 并通过 ESP-IDF 开机内存测试；随后出现 `QSPI 10 MHz, drive cap 0, 368x448 RGB565` 及每秒 `benchmark` 指标。观察至少一轮 PARTIAL → FULL → PARTIAL，核对六种颜色、灰阶、四周边界以及移动竖条；记录 FULL 的稳定 FPS 和最大帧耗时。
+启动日志应报告 PSRAM 为 8 MB 并通过 ESP-IDF 开机内存测试；随后出现 `QSPI 20 MHz, drive cap 0, 368x448 RGB565` 及每秒 `benchmark` 指标。观察至少一轮 PARTIAL → FULL → PARTIAL，核对六种颜色、灰阶、四周边界以及移动竖条；记录 FULL 的稳定 FPS 和最大帧耗时。
 
 详细架构、资料依据和验证状态见 [bringup-plan.md](docs/AMOLED/bringup-plan.md)。本次未接入触摸、无线扫描或产品 UI。
