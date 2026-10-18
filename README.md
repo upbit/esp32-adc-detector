@@ -6,7 +6,7 @@
 
 ## 硬件与接线
 
-已通过 esptool 识别 ESP32-S3 rev v0.2、8 MB Quad Flash、8 MB Embedded PSRAM、40 MHz 晶振。屏幕为 368×448、CO5300，使用 **QSPI、RGB565、DMA 双缓冲**（当前黑屏诊断暂降为 10 MHz，目标配置为 40 MHz）。采用 [Espressif CO5300 2.2.0 驱动](https://components.espressif.com/components/espressif/esp_lcd_co5300/versions/2.2.0/readme)。
+已通过 esptool 识别 ESP32-S3 rev v0.2、8 MB Quad Flash、8 MB Embedded PSRAM、40 MHz 晶振。屏幕为 368×448、CO5300，使用 **QSPI、RGB565、DMA 双缓冲**（当前 baseline 为 1 MHz，SPI mode 3，使用卖家初始化序列；40 MHz 在杜邦线上未通过，待逐档提速）。采用 [Espressif CO5300 2.2.0 驱动](https://components.espressif.com/components/espressif/esp_lcd_co5300/versions/2.2.0/readme)。
 
 开发板排针依据 [ESP32-S3_R8N8_pinlayout.png](docs/ESP32-S3_R8N8_pinlayout.png) 核对。**以下为新接线，替换上一版 GPIO6/7/15/16/17/18 分配。** QSPI 使用 SPI2 原生 IO_MUX 引脚 GPIO9–14，六根信号线集中在左侧连续排针。
 
@@ -18,7 +18,7 @@
 | D0 | GPIO11 | QSPI DATA0 |
 | SCK | GPIO12 | QSPI 时钟 |
 | CS | GPIO10 | 片选 |
-| GND | GND | 共地 |
+| GND | 左侧 GPIO6 与 GPIO7 之间的 GND | 共地；**必须用靠近 QSPI 信号的这个 GND**，见下方说明 |
 | 3V3 | 3V3 | 成品屏电源 |
 | SCL | GPIO8 | 下一步触摸接线；当前固件未启用 |
 | SDA | GPIO7 | 下一步触摸接线；当前固件未启用 |
@@ -41,7 +41,7 @@ RST     ← 不接
 GND     ← 屏幕 GND
 ```
 
-QSPI 信号线尽量短，建议先控制在约 10 cm 以内；连接端只按丝印辨认，勿凭线材颜色判断。背面插座方向见 [AMOLED-pinout.jpg](docs/AMOLED/AMOLED-pinout.jpg)。RST/TE/EN 测试点暂不接，使用板上上电复位和 CO5300 软件复位。引脚和屏幕参数统一定义于 [src/board.h](src/board.h)。断电调整接线。用户已确认显示及 GPIO7/8 触摸接线，测试固件已于 2026-10-18 烧录；用户反馈初版雪花屏、复位后黑屏；10 MHz 纯色诊断也未通过（白色块/黑线后黑屏），当前处于硬件和初始化排查阶段。
+QSPI 信号线尽量短，建议先控制在约 10 cm 以内；连接端只按丝印辨认，勿凭线材颜色判断。背面插座方向见 [AMOLED-pinout.jpg](docs/AMOLED/AMOLED-pinout.jpg)。RST/TE/EN 测试点暂不接，使用板上上电复位和 CO5300 软件复位。引脚和屏幕参数统一定义于 [src/board.h](src/board.h)。断电调整接线。**2026-10-18 已点亮。** 之前出现白块/黑线后黑屏，根因是地回路：屏幕 GND 原先接在底部 GND，四根数据线同时翻转时地弹导致 QSPI 像素写入出错，单根线、单线 SPI 都正常。把屏幕 GND 改接到靠近 GPIO7–14 的 GND 后恢复正常。另外 SCK/D0–D3 的驱动能力已降到 0（`LCD_DRIVE_CAP`），用来减缓杜邦线上的信号边沿。排查过程见 [bringup-plan.md](docs/AMOLED/bringup-plan.md)。
 
 ### 下一步：触摸接线
 
@@ -51,7 +51,7 @@ QSPI 信号线尽量短，建议先控制在约 10 cm 以内；连接端只按�
 
 ## 测试画面
 
-当前诊断版本启动时先依次显示 **红 → 绿 → 蓝 → 白 → 黑**，每色 2 秒，再进入下面的 FPS 页面。QSPI 暂用 10 MHz；原有 40 MHz 测量只保留作历史记录，未通过可见显示验证。
+启动时先显示四组条纹（D0、D0–D1、D0–D2、D0–D3 依次在每个时钟一起翻转），正常颜色依次为蓝 / 紫 / 玫红 / 粉红，每组 3 秒；之后依次显示 **红 → 绿 → 蓝 → 白 → 黑** 纯色，每色 2 秒；然后进入下面的 FPS 页面。1 MHz 下画面刷新会明显变慢。
 
 画面每 **15 秒**切换一次：
 
@@ -83,6 +83,6 @@ pio device monitor -p /dev/cu.usbmodem1401 -b 115200
 
 本机若 `pio` 不在 PATH，将其替换为 `/Users/gao/.platformio/penv/bin/pio`。串口路径会随 USB 连接变化，烧录前重新确认。固件输出位于 `.pio/build/esp32-s3-n8r8/firmware.bin`。
 
-启动日志应报告 PSRAM 为 8 MB 并通过 ESP-IDF 开机内存测试；随后出现 `QSPI 10 MHz, 368x448 RGB565`（当前诊断配置） 及每秒 `benchmark` 指标。观察至少一轮 PARTIAL → FULL → PARTIAL，核对六种颜色、灰阶、四周边界以及移动竖条；记录 FULL 的稳定 FPS 和最大帧耗时。
+启动日志应报告 PSRAM 为 8 MB 并通过 ESP-IDF 开机内存测试；随后出现 `QSPI 1 MHz, drive cap 0, 368x448 RGB565` 及每秒 `benchmark` 指标。观察至少一轮 PARTIAL → FULL → PARTIAL，核对六种颜色、灰阶、四周边界以及移动竖条；记录 FULL 的稳定 FPS 和最大帧耗时。
 
 详细架构、资料依据和验证状态见 [bringup-plan.md](docs/AMOLED/bringup-plan.md)。本次未接入触摸、无线扫描或产品 UI。

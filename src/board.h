@@ -3,8 +3,10 @@
 // ESP32-S3_R8N8_pinlayout.png: SPI2 native IO_MUX pins, left header GPIO9-14.
 #define LCD_WIDTH 368
 #define LCD_HEIGHT 448
-#define LCD_QSPI_HZ (10 * 1000 * 1000) // Diagnostic speed; restore 40 MHz after visible validation.
+#define LCD_QSPI_HZ (1 * 1000 * 1000) // Verified baseline; 40 MHz failed on the Dupont wiring.
 #define LCD_SPI_HOST SPI2_HOST
+#define LCD_SINGLE_WIRE 0 // Diagnostic: SCK/CS/D0 only, like the vendor example; 0 = QSPI.
+#define LCD_DRIVE_CAP GPIO_DRIVE_CAP_0 // Weakest (~5 mA) on SCK/D0-D3; ESP-IDF default is 2.
 #define LCD_PIN_SCK 12
 #define LCD_PIN_CS 10
 #define LCD_PIN_D0 11

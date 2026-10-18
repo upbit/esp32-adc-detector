@@ -28,7 +28,7 @@
 static const char *TAG = "main";
 
 #define TOUCH_ENABLE  1     //触摸开关
-#define test_lvgl     1     //lvgl案例开关
+#define test_lvgl     0     //lvgl案例开关
 #define TOUCH_CHIP    1     //触摸芯片选择: 1=CHSC6417, 0=FT5x06
 
 #define TEST_LCD_HOST               SPI2_HOST
@@ -36,12 +36,12 @@ static const char *TAG = "main";
 #define TEST_LCD_V_RES              (448)
 #define TEST_LCD_BIT_PER_PIXEL      (16)
 
-#define TEST_PIN_NUM_LCD_CS         (GPIO_NUM_16)
-#define TEST_PIN_NUM_LCD_PCLK       (GPIO_NUM_6)
-#define TEST_PIN_NUM_LCD_DATA0      (GPIO_NUM_7)
-#define TEST_PIN_NUM_LCD_DATA1      (GPIO_NUM_15)
-#define TEST_PIN_NUM_LCD_DATA2      (GPIO_NUM_17)
-#define TEST_PIN_NUM_LCD_DATA3      (GPIO_NUM_18)
+#define TEST_PIN_NUM_LCD_CS         (GPIO_NUM_10)
+#define TEST_PIN_NUM_LCD_PCLK       (GPIO_NUM_12)
+#define TEST_PIN_NUM_LCD_DATA0      (GPIO_NUM_11)
+#define TEST_PIN_NUM_LCD_DATA1      (GPIO_NUM_13)
+#define TEST_PIN_NUM_LCD_DATA2      (GPIO_NUM_14)
+#define TEST_PIN_NUM_LCD_DATA3      (GPIO_NUM_9)
 #define TEST_PIN_NUM_LCD_RST        (GPIO_NUM_NC)
 #define TEST_PIN_NUM_BK_LIGHT       (GPIO_NUM_NC)    // 背光引脚
 #define TEST_LCD_BK_LIGHT_ON_LEVEL  (1)
@@ -53,8 +53,8 @@ static const char *TAG = "main";
 #define EXAMPLE_TOUCH_I2C_CLK_HZ    (400000)
 
 /* LCD touch pins */
-#define EXAMPLE_TOUCH_I2C_SCL       (GPIO_NUM_5)
-#define EXAMPLE_TOUCH_I2C_SDA       (GPIO_NUM_4)
+#define EXAMPLE_TOUCH_I2C_SCL       (GPIO_NUM_8)
+#define EXAMPLE_TOUCH_I2C_SDA       (GPIO_NUM_7)
 #define EXAMPLE_TOUCH_GPIO_INT      (GPIO_NUM_NC)
 
 
@@ -232,11 +232,12 @@ static esp_err_t lcd_init(void)
 
     ESP_LOGI(TAG, "Install panel IO");
 
-    const esp_lcd_panel_io_spi_config_t io_config = SPD2010_PANEL_IO_SPI_CONFIG(
+    esp_lcd_panel_io_spi_config_t io_config = SPD2010_PANEL_IO_SPI_CONFIG(
         TEST_PIN_NUM_LCD_CS, 
         -1, 
         test_notify_refresh_ready, 
         NULL);
+    io_config.pclk_hz = 10 * 1000 * 1000;   // 杜邦线约 8cm，单线 SPI 点屏验证先用 10MHz
 
     // const esp_lcd_panel_io_spi_config_t io_config = SPD2010_PANEL_IO_QSPI_CONFIG(TEST_PIN_NUM_LCD_CS, NULL, NULL);
 
