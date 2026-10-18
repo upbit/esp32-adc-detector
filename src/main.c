@@ -46,12 +46,13 @@ static void pose_task(void *arg)
             else if (cmd.type==CMD_SIGNAL) signal_enabled=cmd.value!=0;
             else if (cmd.type==CMD_IMU) {
                 /* Raw gyro/accel dump: confirms the mount axis and the yaw sign
-                 * against a physical rotation, since neither is measured. */
-                float gyro[3],accel[3];
-                if (chart_imu_read(gyro,accel)==ESP_OK)
-                    ESP_LOGI("imu","gyro=%.3f,%.3f,%.3f dps accel=%.3f,%.3f,%.3f g yaw_rate=%.3f",
+                 * against a physical rotation, since neither is measured. The die
+                 * temperature is for diagnosing bias drift after handling. */
+                float gyro[3],accel[3],temp_c;
+                if (chart_imu_read(gyro,accel,&temp_c)==ESP_OK)
+                    ESP_LOGI("imu","gyro=%.3f,%.3f,%.3f dps accel=%.3f,%.3f,%.3f g yaw_rate=%.3f temp=%.2f C",
                         gyro[0],gyro[1],gyro[2],accel[0],accel[1],accel[2],
-                        chart_yaw_rate(gyro,integrator.bias,accel));
+                        chart_yaw_rate(gyro,integrator.bias,accel),temp_c);
                 else ESP_LOGW("imu","read failed");
             } else if (cmd.type==CMD_CLEAR || cmd.type==CMD_ZERO || cmd.type==CMD_CAL) {
                 lock();
@@ -113,7 +114,7 @@ static void pose_task(void *arg)
         bool ready=false;
         if (imu_ready) {
             float gyro[3],accel[3],tilt;
-            esp_err_t err=chart_imu_read(gyro,accel);
+            esp_err_t err=chart_imu_read(gyro,accel,NULL);
             now=esp_timer_get_time();
             if (err!=ESP_OK) {
                 /* A read that fails after a good init is still unrecoverable

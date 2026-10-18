@@ -83,7 +83,7 @@
 #define CHART_IMU_ADDRESS 0x68
 #define CHART_IMU_I2C_HZ 100000
 #define CHART_IMU_HZ 100
-#define CHART_IMU_GYRO_FS 0 /* 0=250, 1=500, 2=1000, 3=2000 degrees/s. */
+#define CHART_IMU_GYRO_FS 1 /* 0=250, 1=500, 2=1000, 3=2000 degrees/s; 250 clipped on a handheld knock. */
 #define CHART_IMU_DLPF 3 /* MPU6050: ~42 Hz gyro bandwidth. */
 #define CHART_IMU_YAW_SIGN (-1) /* Clockwise from above is positive; bench-verified with the chip face up. */
 #define CHART_IMU_LEVEL_AXIS 2 /* Only used for the tilt readout and the level gate. */

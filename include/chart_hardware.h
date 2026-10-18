@@ -27,7 +27,8 @@ esp_err_t chart_lcd_window_wait(uint16_t **completed_pixels);
 /* Also call on failure to drain successful submissions; stop displaying on error. */
 esp_err_t chart_lcd_window_end(chart_lcd_timing_t *timing);
 esp_err_t chart_imu_init(void);
-esp_err_t chart_imu_read(float gyro[3],float accel[3]);
+/* temp_c may be NULL; it is only reported by the serial imu dump. */
+esp_err_t chart_imu_read(float gyro[3],float accel[3],float *temp_c);
 esp_err_t chart_wifi_start(QueueHandle_t queue,char source[33],int *frequency);
 void chart_wifi_pause(void);
 uint32_t chart_wifi_dropped(void);

@@ -297,7 +297,7 @@ static int16_t signed_word(const uint8_t *p)
     return (int16_t)((uint16_t)p[0]<<8|p[1]);
 }
 
-esp_err_t chart_imu_read(float gyro[3],float accel[3])
+esp_err_t chart_imu_read(float gyro[3],float accel[3],float *temp_c)
 {
     uint8_t reg=0x3b,bytes[14];
     if (!imu) return ESP_ERR_INVALID_STATE;
@@ -307,6 +307,7 @@ esp_err_t chart_imu_read(float gyro[3],float accel[3])
         accel[j]=signed_word(bytes+j*2)/16384.0f;
         gyro[j]=signed_word(bytes+8+j*2)/scales[CHART_IMU_GYRO_FS];
     }
+    if (temp_c) *temp_c=signed_word(bytes+6)/340.0f+36.53f; /* MPU6050 register map 4.18. */
     return ESP_OK;
 }
 
