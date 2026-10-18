@@ -1,0 +1,37 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.espIdfPathWin": "C:\\Users\\PC\\esp\\v5.5\\esp-idf",
+  "idf.pythonInstallPath": "c:\\Espressif\\tools\\idf-python\\3.11.2\\python.exe",
+  "idf.espAdfPathWin": "C:\\Espressif\\esp-adf",
+  "idf.openOcdConfigs": [
+    "board/esp32s3-builtin.cfg"
+  ],
+  "idf.portWin": "COM28",
+  "idf.toolsPathWin": "c:\\Espressif",
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32s3"
+  },
+  "idf.flashType": "UART",
+  "files.associations": {
+    "lv_demo_widgets.h": "c",
+    "lv_demos.h": "c",
+    "semphr.h": "c",
+    "esp_lcd_spd2010.h": "c",
+    "lcd_tk0134.h": "c",
+    "lvgl.h": "c",
+    "bitset": "c",
+    "charconv": "c",
+    "compare": "c",
+    "concepts": "c",
+    "cstdlib": "c",
+    "ratio": "c",
+    "string_view": "c",
+    "system_error": "c",
+    "tuple": "c",
+    "type_traits": "c",
+    "cmath": "c",
+    "limits": "c",
+    "new": "c"
+  },
+  "idf.currentSetup": "E:\\esp\\v6.0.2\\esp-idf"
+}

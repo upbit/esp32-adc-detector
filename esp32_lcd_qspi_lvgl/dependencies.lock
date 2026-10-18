@@ -1,0 +1,58 @@
+dependencies:
+  espressif/cmake_utilities:
+    component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.5.3
+  espressif/esp_lcd_touch:
+    dependencies: []
+    source:
+      path: components/espressif__esp_lcd_touch
+      type: local
+    version: 1.1.2
+  espressif/esp_lcd_touch_ft5x06:
+    dependencies: []
+    source:
+      path: components/espressif__esp_lcd_touch_ft5x06
+      type: local
+    version: 1.0.7
+  espressif/esp_lvgl_port:
+    component_hash: 3264cc85d86a7c32b67d26a1353a57c67e7986bb293ebb1731801936b056e632
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.1'
+    - name: lvgl/lvgl
+      registry_url: https://components.espressif.com
+      require: public
+      version: '>=8,<10'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.6.3
+  idf:
+    source:
+      type: idf
+    version: 6.0.2
+  lvgl/lvgl:
+    component_hash: 2409fdc84e9766d2a18afd84b051aef3f838348136cdb1c10ac2e8bcdb012bf6
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 9.2.0
+direct_dependencies:
+- espressif/cmake_utilities
+- espressif/esp_lcd_touch
+- espressif/esp_lcd_touch_ft5x06
+- espressif/esp_lvgl_port
+- idf
+- lvgl/lvgl
+manifest_hash: 471eeb2250659b6933379de62f76e57d433aaca02eeeea97d34bec3a31ca331d
+target: esp32s3
+version: 3.0.0
