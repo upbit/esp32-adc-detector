@@ -66,12 +66,12 @@ static void update_stats(lv_timer_t *timer)
         return;
     }
     lv_label_set_text_fmt(fps_label, "%.1f FPS", (double)stats.fps);
-    lv_label_set_text_fmt(details_label, "%.2f MB/s | full eq %.1f FPS\nFrame avg %.1f / max %.1f ms",
-                         (double)stats.megabytes_per_second, (double)stats.full_frame_fps,
+    lv_label_set_text_fmt(details_label, "%.2f MB/s | bus %.0f%%\nFrame avg %.1f / max %.1f ms",
+                         (double)stats.megabytes_per_second, (double)stats.bus_percent,
                          (double)stats.average_ms, (double)stats.maximum_ms);
-    ESP_LOGI("benchmark", "%s: completed=%.1f FPS, payload=%.2f MB/s, full_equiv=%.1f FPS, frame_avg=%.1f ms, frame_max=%.1f ms",
+    ESP_LOGI("benchmark", "%s: completed=%.1f FPS, payload=%.2f MB/s, bus=%.0f%%, frame_avg=%.1f ms, frame_max=%.1f ms",
              full_mode ? "FULL" : "PARTIAL", (double)stats.fps, (double)stats.megabytes_per_second,
-             (double)stats.full_frame_fps, (double)stats.average_ms, (double)stats.maximum_ms);
+             (double)stats.bus_percent, (double)stats.average_ms, (double)stats.maximum_ms);
 }
 
 void ui_init(lv_display_t *display)

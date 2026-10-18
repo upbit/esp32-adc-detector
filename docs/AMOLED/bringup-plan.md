@@ -358,3 +358,14 @@ flowchart LR
 - **RGB332 模式**：用公开命令 `COLMOD 3Ah` 切换。0x55 为 RGB565，0x22 为 RGB332（IFPF=010，手册 p.25/p.176 显示 QSPI 四线支持）。只是普通显示寄存器，不解锁、不烧录，掉电恢复。RGB332 下 LVGL 的 flush 会把 RGB565 原地转换为 RRRGGGBB，雷达直接输出 1 字节像素。
 - **BOOT 键**：短按循环切换面积档（10% / 25% / 35% / 50% / 整圈 / LVGL 对比），长按（≥ 0.8 s）切换 RGB565 / RGB332（LVGL 档固定为 RGB565）。每次切档都重设 COLMOD，LVGL 整屏重绘，雷达整圆重绘一次。
 - **分步实施**：A. 直接写入的 display.c 加 `-O2`，沿用现有测试页做目视验证；B. radar.c、双核、BOOT、新的 UI；C. LVGL 对比档。
+
+### A 步结果：直接 SPI 加 -O2（通过）
+
+`display.c` 不再经过 esp_lcd，直接通过 `spi_device_queue_trans` 发送；`post_cb` 在 ISR 中回收描述符，总线不再等待命令。单次 DMA 最大 32 KB（`SPI_LL_DMA_MAX_BIT_LEN`），超过时按行拆分，每段各自设窗口。没有数据阶段的命令不能设置 `SPI_TRANS_USE_TXDATA`。用户目视确认：渐变和 PARTIAL/FULL 都正常。
+
+| 模式 | esp_lcd，-Og | 直接 SPI，-O2 |
+|---|---|---|
+| FULL 帧耗时 | 33 ms | 25.2 ms（30.3 FPS，总线 50%） |
+| PARTIAL 帧耗时 | 7.5 ms | 5.0 ms |
+
+PARTIAL 的 FPS 从 62 变为 30，是因为改用了 LVGL 默认的 33 ms 刷新周期，不代表性能下降。
