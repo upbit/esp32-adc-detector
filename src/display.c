@@ -1,6 +1,5 @@
 #include <assert.h>
 #include <stdint.h>
-#include <string.h>
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
@@ -115,46 +114,40 @@ static uint32_t tick_ms(void)
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
-static void draw_test_screen(const void *buffer)
+static uint16_t test_pixel(int x, int y)
 {
+    static const uint16_t bars[] = {0xF800, 0x07E0, 0x001F, 0xFFFF, 0x0000};
+    if (y < LCD_HEIGHT * 2 / 5) return bars[x * 5 / LCD_WIDTH];
+    // Smooth ramps: every pixel differs from its neighbour, so any bit error from
+    // marginal QSPI timing shows as speckles instead of hiding in a regular pattern.
+    int band = (y - LCD_HEIGHT * 2 / 5) * 4 / (LCD_HEIGHT - LCD_HEIGHT * 2 / 5);
+    uint16_t r = x * 31 / (LCD_WIDTH - 1), g = x * 63 / (LCD_WIDTH - 1);
+    switch (band) {
+    case 0: return r << 11;
+    case 1: return g << 5;
+    case 2: return r;
+    default: return r << 11 | g << 5 | r;
+    }
+}
+
+// Single startup screen: R/G/B/W/K bars on top, red/green/blue/gray ramps below.
+static void test_pattern(uint16_t *buffer)
+{
+    ESP_LOGI("display", "Test pattern: color bars + RGB/gray ramps (3 seconds)");
     for (int y = 0; y < LCD_HEIGHT; y += LCD_BUFFER_LINES) {
         int end = y + LCD_BUFFER_LINES < LCD_HEIGHT ? y + LCD_BUFFER_LINES : LCD_HEIGHT;
+        for (int row = y; row < end; row++) {
+            for (int x = 0; x < LCD_WIDTH; x++) {
+                buffer[(row - y) * LCD_WIDTH + x] = __builtin_bswap16(test_pixel(x, row));
+            }
+        }
         ESP_ERROR_CHECK(draw(0, y, LCD_WIDTH, end, buffer));
         if (xSemaphoreTake(startup_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
-            ESP_LOGE("display", "Test screen DMA timed out at row %d", y);
+            ESP_LOGE("display", "Test pattern DMA timed out at row %d", y);
             ESP_ERROR_CHECK(ESP_ERR_TIMEOUT);
         }
     }
-}
-
-// Quad pixel writes put byte bits 4/0 on SIO0, 5/1 on SIO1, 6/2 on SIO2 and 7/3 on
-// SIO3 (datasheet p.21). Each line alone passed with static levels (0x11 << n).
-// Byte ((1 << n) - 1) << 4 toggles D0..D(n-1) together on every clock, so the
-// first failing step shows how many simultaneously switching lines break QSPI.
-static void test_switching_lines(uint8_t *buffer)
-{
-    size_t half = LCD_WIDTH * LCD_BUFFER_LINES; // Bytes in half the buffer's rows.
-    for (int lines = 1; lines <= 4; lines++) {
-        ESP_LOGI("display", "Switching test: D0-D%d toggle every clock, stripes on black (3 seconds)",
-                 lines - 1);
-        memset(buffer, ((1 << lines) - 1) << 4, half);
-        memset(buffer + half, 0, half);
-        draw_test_screen(buffer);
-        vTaskDelay(pdMS_TO_TICKS(3000));
-    }
-}
-
-static void test_solid_colors(uint16_t *buffer)
-{
-    static const uint16_t colors[] = {0xF800, 0x07E0, 0x001F, 0xFFFF, 0x0000};
-    static const char *names[] = {"RED", "GREEN", "BLUE", "WHITE", "BLACK"};
-    for (size_t c = 0; c < sizeof(colors) / sizeof(colors[0]); c++) {
-        ESP_LOGI("display", "Solid color test: %s (2 seconds)", names[c]);
-        uint16_t swapped = __builtin_bswap16(colors[c]);
-        for (int i = 0; i < LCD_WIDTH * LCD_BUFFER_LINES; i++) buffer[i] = swapped;
-        draw_test_screen(buffer);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    }
+    vTaskDelay(pdMS_TO_TICKS(3000));
 }
 
 lv_display_t *display_init(void)
@@ -180,8 +173,8 @@ lv_display_t *display_init(void)
         LCD_PIN_D1, LCD_PIN_D2, LCD_PIN_D3, buffer_size);
 #endif
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_SPI_HOST, &bus, SPI_DMA_CH_AUTO));
-    // Slower edges for the ~8 cm Dupont wiring. Verified with the panel GND next to
-    // GPIO7 at 1 MHz; at 40 MHz neither cap 0 nor cap 2 displayed correctly.
+    // Edge rate vs. ground bounce on the ~8 cm cable, whose QSPI bundle has no GND
+    // wire. Cap 0 verified at 1 MHz; at 40 MHz neither cap 0 nor cap 2 worked.
     static const int lcd_pins[] = {LCD_PIN_SCK, LCD_PIN_D0, LCD_PIN_D1, LCD_PIN_D2, LCD_PIN_D3};
     for (size_t i = 0; i < sizeof(lcd_pins) / sizeof(lcd_pins[0]); i++) {
         ESP_ERROR_CHECK(gpio_set_drive_capability(lcd_pins[i], LCD_DRIVE_CAP));
@@ -215,8 +208,7 @@ lv_display_t *display_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
     startup_done = xSemaphoreCreateBinary();
     assert(startup_done);
-    if (!LCD_SINGLE_WIRE) test_switching_lines(first);
-    test_solid_colors(first);
+    test_pattern(first);
     vSemaphoreDelete(startup_done);
     startup_done = NULL; // All transfers completed before LVGL starts using the buffers.
     sample_start_us = esp_timer_get_time();

@@ -6,7 +6,7 @@
 
 ## 硬件与接线
 
-已通过 esptool 识别 ESP32-S3 rev v0.2、8 MB Quad Flash、8 MB Embedded PSRAM、40 MHz 晶振。屏幕为 368×448、CO5300，使用 **QSPI、RGB565、DMA 双缓冲**（当前 baseline 为 1 MHz，SPI mode 3，使用卖家初始化序列；40 MHz 在杜邦线上未通过，待逐档提速）。采用 [Espressif CO5300 2.2.0 驱动](https://components.espressif.com/components/espressif/esp_lcd_co5300/versions/2.2.0/readme)。
+已通过 esptool 识别 ESP32-S3 rev v0.2、8 MB Quad Flash、8 MB Embedded PSRAM、40 MHz 晶振。屏幕为 368×448、CO5300，使用 **QSPI、RGB565、DMA 双缓冲**（当前 10 MHz 已验证，SPI mode 3，使用卖家初始化序列；40 MHz 在杜邦线上未通过，正在逐档提速）。采用 [Espressif CO5300 2.2.0 驱动](https://components.espressif.com/components/espressif/esp_lcd_co5300/versions/2.2.0/readme)。
 
 开发板排针依据 [ESP32-S3_R8N8_pinlayout.png](docs/ESP32-S3_R8N8_pinlayout.png) 核对。**以下为新接线，替换上一版 GPIO6/7/15/16/17/18 分配。** QSPI 使用 SPI2 原生 IO_MUX 引脚 GPIO9–14，六根信号线集中在左侧连续排针。
 
@@ -51,7 +51,7 @@ QSPI 信号线尽量短，建议先控制在约 10 cm 以内；连接端只按�
 
 ## 测试画面
 
-启动时先显示四组条纹（D0、D0–D1、D0–D2、D0–D3 依次在每个时钟一起翻转），正常颜色依次为蓝 / 紫 / 玫红 / 粉红，每组 3 秒；之后依次显示 **红 → 绿 → 蓝 → 白 → 黑** 纯色，每色 2 秒；然后进入下面的 FPS 页面。1 MHz 下画面刷新会明显变慢。
+启动时先显示一屏检测画面，持续 3 秒：上 2/5 为 **红 / 绿 / 蓝 / 白 / 黑** 竖条，下 3/5 为红、绿、蓝、灰四条从黑到亮的横向渐变。渐变平滑、没有噪点或断层，就说明 QSPI 时序正常。然后进入下面的 FPS 页面。
 
 画面每 **15 秒**切换一次：
 
@@ -83,6 +83,6 @@ pio device monitor -p /dev/cu.usbmodem1401 -b 115200
 
 本机若 `pio` 不在 PATH，将其替换为 `/Users/gao/.platformio/penv/bin/pio`。串口路径会随 USB 连接变化，烧录前重新确认。固件输出位于 `.pio/build/esp32-s3-n8r8/firmware.bin`。
 
-启动日志应报告 PSRAM 为 8 MB 并通过 ESP-IDF 开机内存测试；随后出现 `QSPI 1 MHz, drive cap 0, 368x448 RGB565` 及每秒 `benchmark` 指标。观察至少一轮 PARTIAL → FULL → PARTIAL，核对六种颜色、灰阶、四周边界以及移动竖条；记录 FULL 的稳定 FPS 和最大帧耗时。
+启动日志应报告 PSRAM 为 8 MB 并通过 ESP-IDF 开机内存测试；随后出现 `QSPI 10 MHz, drive cap 0, 368x448 RGB565` 及每秒 `benchmark` 指标。观察至少一轮 PARTIAL → FULL → PARTIAL，核对六种颜色、灰阶、四周边界以及移动竖条；记录 FULL 的稳定 FPS 和最大帧耗时。
 
 详细架构、资料依据和验证状态见 [bringup-plan.md](docs/AMOLED/bringup-plan.md)。本次未接入触摸、无线扫描或产品 UI。
