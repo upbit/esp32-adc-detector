@@ -5,11 +5,6 @@
 
 #include "lvgl.h"
 
-typedef enum {
-    DISPLAY_RGB565,
-    DISPLAY_RGB332,
-} display_format_t;
-
 typedef struct {
     float fps;
     float megabytes_per_second;
@@ -22,10 +17,7 @@ typedef struct {
 typedef void (*display_band_done_cb_t)(void *context);
 
 lv_display_t *display_init(void);
-// Panel pixel format; also switches how LVGL flushes are encoded.
-void display_set_format(display_format_t format);
-display_format_t display_get_format(void);
-// Queue one rectangle (x2/y2 exclusive) of already-encoded pixels. Blocks only for
+// Queue one rectangle (x2/y2 exclusive) of big-endian RGB565 pixels. Blocks only for
 // SPI queue space; `done` runs in ISR once sent. `frame_last` closes a stats frame
 // that opened with the first band queued after the previous frame closed.
 // Call from one task only.

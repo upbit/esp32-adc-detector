@@ -63,7 +63,6 @@ static slot_t slots[SLOT_COUNT];
 static unsigned next_slot;
 static SemaphoreHandle_t free_slots;
 static volatile uint32_t pending;
-static display_format_t format = DISPLAY_RGB565;
 static portMUX_TYPE stats_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t completed_frames, completed_bytes;
 static int64_t frame_total_us, frame_max_us, sample_start_us, open_frame_start_us;
@@ -127,7 +126,7 @@ void display_queue_band(int x1, int y1, int x2, int y2, const void *pixels, bool
                         display_band_done_cb_t done, void *context)
 {
     if (!open_frame_start_us) open_frame_start_us = esp_timer_get_time();
-    size_t row_bytes = (x2 - x1) * (format == DISPLAY_RGB332 ? 1 : 2);
+    size_t row_bytes = (x2 - x1) * 2;
     // One DMA transaction carries at most 2^18 bits (SPI_LL_DMA_MAX_BIT_LEN). Split by
     // rows, each with its own window, so no continuation-write command is needed.
     int rows_per_chunk = MAX_PIXEL_BYTES / row_bytes;
@@ -157,18 +156,6 @@ void display_queue_band(int x1, int y1, int x2, int y2, const void *pixels, bool
     }
 }
 
-void display_set_format(display_format_t new_format)
-{
-    format = new_format;
-    // IFPF[2:0] (datasheet p.176): 101 = 16 bpp, 010 = RGB332. Public command.
-    send_command(CMD_COLMOD, (uint8_t[]){format == DISPLAY_RGB332 ? 0x22 : 0x55}, 1);
-}
-
-display_format_t display_get_format(void)
-{
-    return format;
-}
-
 static void flush_done(void *context)
 {
     // LVGL explicitly permits flush_ready from an ISR. No other LVGL work here.
@@ -178,17 +165,10 @@ static void flush_done(void *context)
 static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
 {
     size_t count = lv_area_get_size(area);
-    if (format == DISPLAY_RGB332) {
-        const uint16_t *in = (const uint16_t *)pixels;
-        for (size_t i = 0; i < count; i++) { // In place: byte i never overtakes pixel i.
-            uint16_t c = in[i];
-            pixels[i] = (c >> 13) << 5 | ((c >> 8) & 0x7) << 2 | ((c >> 3) & 0x3);
-        }
-    } else {
-        lv_draw_sw_rgb565_swap(pixels, count); // CO5300 consumes big-endian RGB565.
-    }
-    display_queue_band(area->x1, area->y1, area->x2 + 1, area->y2 + 1, pixels,
-                       lv_display_flush_is_last(display), flush_done, display);
+    lv_draw_sw_rgb565_swap(pixels, count); // CO5300 consumes big-endian RGB565.
+    // LVGL only draws text here; frame stats count radar frames, not LVGL refreshes.
+    display_queue_band(area->x1, area->y1, area->x2 + 1, area->y2 + 1, pixels, false,
+                       flush_done, display);
 }
 
 static void round_area(lv_event_t *event)
