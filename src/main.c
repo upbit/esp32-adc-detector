@@ -10,6 +10,7 @@
 
 #include "display.h"
 #include "radar.h"
+#include "touch.h"
 #include "ui.h"
 
 #define BOOT_PIN GPIO_NUM_0
@@ -25,6 +26,12 @@ static void apply_tier(void)
     ESP_LOGI("benchmark", "tier: %d%%", radar_tier_percent(tier));
 }
 
+static void change_tier(int step)
+{
+    tier = (tier + RADAR_TIER_COUNT + step) % RADAR_TIER_COUNT;
+    apply_tier();
+}
+
 // Each press selects the next tier. Polled from the display loop; the 30 ms
 // re-arm delay is longer than any contact bounce.
 static void poll_boot(void)
@@ -38,8 +45,7 @@ static void poll_boot(void)
     } else if (!level_down && down) {
         down = false;
         released_at = now;
-        tier = (tier + 1) % RADAR_TIER_COUNT;
-        apply_tier();
+        change_tier(1);
     }
 }
 
@@ -72,6 +78,11 @@ void app_main(void)
     lv_display_t *display = display_init();
     ui_init(display);
     lv_refr_now(display); // Paint the black screen and text before the radar draws.
+    esp_err_t touch_err = touch_init();
+    if (touch_err != ESP_OK) {
+        ESP_LOGW("main", "Touch disabled: %s (SCL GPIO8 / SDA GPIO7); BOOT remains available",
+                 esp_err_to_name(touch_err));
+    }
     radar_init();
     apply_tier();
     // Display task (core 0): radar bands, LVGL text and stats share one SPI queue.
@@ -79,6 +90,10 @@ void app_main(void)
     for (;;) {
         radar_pump(5);
         poll_boot();
+        touch_status_t touch_status;
+        touch_swipe_t swipe = touch_poll(&touch_status);
+        ui_show_touch(touch_status);
+        if (swipe != TOUCH_SWIPE_NONE) change_tier(swipe == TOUCH_SWIPE_DOWN ? 1 : -1);
         lv_timer_handler();
         int64_t now = esp_timer_get_time();
         if (now - last_report >= 1000000) {

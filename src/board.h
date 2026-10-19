@@ -14,6 +14,6 @@
 #define LCD_PIN_D2 14
 #define LCD_PIN_D3 9
 #define LCD_PIN_RST (-1) // Module's RC power-on reset; use software reset.
-#define TOUCH_PIN_SCL 8 // Reserved; touch is not initialized in this test.
+#define TOUCH_PIN_SCL 8 // CHSC6417 I²C, shared module power-on reset.
 #define TOUCH_PIN_SDA 7
 #define LCD_BUFFER_LINES 48
