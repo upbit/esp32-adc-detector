@@ -1,7 +1,5 @@
-#include "driver/gpio.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_psram.h"
 #include "esp_timer.h"
@@ -11,59 +9,21 @@
 #include "board.h"
 #include "display.h"
 #include "ina226.h"
-#include "radar.h"
 #include "touch.h"
 #include "ui.h"
 
-#define BOOT_PIN GPIO_NUM_0
-
-static radar_tier_t tier = RADAR_TIER_10;
-static bool settling = true;
-
-static void apply_tier(void)
+static void log_touch(void)
 {
-    radar_set_tier(tier);
-    ui_set_tier(tier);
-    settling = true; // First stats window after a switch mixes both tiers.
-    ESP_LOGI("benchmark", "tier: %d%%", radar_tier_percent(tier));
-}
-
-static void change_tier(int step)
-{
-    tier = (tier + RADAR_TIER_COUNT + step) % RADAR_TIER_COUNT;
-    apply_tier();
-}
-
-// Each press selects the next tier. Polled from the display loop; the 30 ms
-// re-arm delay is longer than any contact bounce.
-static void poll_boot(void)
-{
-    static int64_t released_at;
-    static bool down;
-    int64_t now = esp_timer_get_time();
-    bool level_down = gpio_get_level(BOOT_PIN) == 0;
-    if (level_down && !down && now - released_at > 30000) {
-        down = true;
-    } else if (!level_down && down) {
-        down = false;
-        released_at = now;
-        change_tier(1);
+    static touch_status_t previous = TOUCH_STATUS_UP;
+    touch_status_t status;
+    touch_poll(&status); // The driver logs recognized swipes.
+    // Compare valid contacts only; recovery from an I2C error is not a release.
+    if (status == TOUCH_STATUS_ERROR || status == TOUCH_STATUS_OFF) return;
+    if (status != previous) {
+        if (status == TOUCH_STATUS_DOWN) ESP_LOGI("touch", "Contact down");
+        if (status == TOUCH_STATUS_UP) ESP_LOGI("touch", "Contact up");
+        previous = status;
     }
-}
-
-static void report(void)
-{
-    display_stats_t display = display_take_stats();
-    radar_stats_t radar = radar_take_stats();
-    if (settling) {
-        settling = false;
-        return;
-    }
-    ui_show_stats(&display, &radar);
-    ESP_LOGI("benchmark", "%d%%: %.1f FPS, %.2f MB/s, bus %.0f%%, frame %.2f/%.2f ms, draw %.2f ms",
-             radar_tier_percent(tier),
-             (double)display.fps, (double)display.megabytes_per_second, (double)display.bus_percent,
-             (double)display.average_ms, (double)display.maximum_ms, (double)radar.render_ms);
 }
 
 static void report_battery(void)
@@ -71,10 +31,12 @@ static void report_battery(void)
     ina226_sample_t sample;
     esp_err_t err = ina226_read(&sample);
     if (err != ESP_OK) {
+        ui_show_sample(NULL);
         ESP_LOGW("battery", "INA226 read failed: %s; sample omitted (check calibration / range / wiring)",
                  esp_err_to_name(err));
         return;
     }
+    ui_show_sample(&sample);
     // raw undoes the gain only to collect linearity points; remove once calibration is settled.
     ESP_LOGI("battery", "VBUS=%.3f V (raw %.4f), I=%+.2f mA (+ charge / - discharge)",
              (double)sample.voltage_v, (double)(sample.voltage_v / INA226_BUS_VOLTAGE_GAIN), (double)(sample.current_a * 1000.0f));
@@ -89,38 +51,29 @@ void app_main(void)
     ESP_LOGI("main", "ESP32-S3 rev %d, %d cores; flash=%lu MB, PSRAM=%u MB",
              chip.revision, chip.cores, (unsigned long)(flash_size / (1024 * 1024)),
              (unsigned)(esp_psram_get_size() / (1024 * 1024)));
-    gpio_config_t boot = {.pin_bit_mask = 1ULL << BOOT_PIN, .mode = GPIO_MODE_INPUT, .pull_up_en = 1};
-    ESP_ERROR_CHECK(gpio_config(&boot));
     lv_display_t *display = display_init();
     ui_init(display);
-    lv_refr_now(display); // Paint the black screen and text before the radar draws.
+    lv_refr_now(display);
     esp_err_t touch_err = touch_init();
     if (touch_err != ESP_OK) {
-        ESP_LOGW("main", "Touch disabled: %s (SCL GPIO8 / SDA GPIO7); BOOT remains available",
-                 esp_err_to_name(touch_err));
+        ESP_LOGW("main", "Touch disabled: %s (SCL GPIO%d / SDA GPIO%d); display remains available",
+                 esp_err_to_name(touch_err), TOUCH_PIN_SCL, TOUCH_PIN_SDA);
     }
     esp_err_t ina226_err = ina226_init();
     if (ina226_err != ESP_OK) {
+        ui_show_sample(NULL);
         ESP_LOGW("main", "INA226 disabled: %s (0x44, SDA GPIO%d / SCL GPIO%d); display remains available",
                  esp_err_to_name(ina226_err), INA226_PIN_SDA, INA226_PIN_SCL);
     }
-    radar_init();
-    apply_tier();
-    // Display task (core 0): radar bands, LVGL text and stats share one SPI queue.
     int64_t last_report = esp_timer_get_time();
     for (;;) {
-        radar_pump(5);
-        poll_boot();
-        touch_status_t touch_status;
-        touch_swipe_t swipe = touch_poll(&touch_status);
-        ui_show_touch(touch_status);
-        if (swipe != TOUCH_SWIPE_NONE) change_tier(swipe == TOUCH_SWIPE_DOWN ? 1 : -1);
+        log_touch();
         lv_timer_handler();
         int64_t now = esp_timer_get_time();
         if (now - last_report >= 1000000) {
             last_report = now;
-            report();
             if (ina226_err == ESP_OK) report_battery();
         }
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
 }

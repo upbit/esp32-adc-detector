@@ -1,67 +1,179 @@
-#include <stdint.h>
+#include <math.h>
+#include <stdio.h>
 
-#include "esp_log.h"
-
-#include "board.h"
-#include "display.h"
-#include "radar.h"
 #include "ui.h"
 
-static lv_obj_t *tier_label, *theory_label, *detail_label, *fps_label, *touch_label;
-static touch_status_t shown_touch_status = TOUCH_STATUS_OFF;
+LV_FONT_DECLARE(font_ui_text_16);
+LV_FONT_DECLARE(font_ui_numbers_36);
+LV_FONT_DECLARE(font_ui_soc_88);
 
-// Centred lines keep text clear of the panel's rounded corners.
-static lv_obj_t *label(int y, const char *text, uint32_t color)
+#define WHITE 0xF5F6F7
+#define MUTED 0xA6ABAF
+#define BLUE 0x26A8F7
+#define PINK 0xFF738D
+#define GREEN 0x35D85A
+#define SAMPLE_SOC 72
+#define IDLE_CURRENT_A 0.001f
+#define TREND_POINTS 48
+
+typedef enum { READING, CHARGING, IDLE, DISCHARGING, UNAVAILABLE } ui_state_t;
+
+static ui_state_t state = READING;
+static lv_obj_t *status_dot, *status_label, *current_label, *current_unit;
+static lv_obj_t *voltage_label, *voltage_unit, *power_label, *battery, *trend;
+static lv_obj_t *time_labels[4];
+
+// Design-reference data only, not estimated SOC or recorded INA226 history.
+static const uint8_t sample_trends[3][TREND_POINTS] = {
+    {60,57,54,51,47,44,41,37,33,29,26,23,21,20,19,20,
+     21,23,25,28,31,34,37,40,43,45,47,49,51,53,54,55,
+     54,53,51,50,52,55,58,60,61,62,64,66,68,70,71,72},
+    {51,49,47,45,43,40,37,35,33,34,36,39,42,46,49,53,
+     57,60,64,67,69,68,66,64,63,65,68,72,75,78,79,77,
+     74,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72},
+    {52,50,48,46,43,41,38,35,34,35,38,42,46,50,54,58,
+     62,66,69,71,70,68,65,64,65,68,72,76,79,82,84,85,
+     83,81,79,77,75,73,71,69,68,66,65,63,62,60,58,56},
+};
+
+static lv_obj_t *label(lv_obj_t *parent, int x, int y, const char *text,
+                       const lv_font_t *font, uint32_t color)
 {
-    lv_obj_t *obj = lv_label_create(lv_screen_active());
-    lv_obj_align(obj, LV_ALIGN_TOP_MID, 0, y);
+    lv_obj_t *obj = lv_label_create(parent);
+    lv_obj_set_pos(obj, x, y);
+    lv_obj_set_style_text_font(obj, font, 0);
     lv_obj_set_style_text_color(obj, lv_color_hex(color), 0);
+    lv_obj_set_style_text_letter_space(obj, 0, 0);
     lv_label_set_text(obj, text);
     return obj;
 }
 
-void ui_set_tier(radar_tier_t tier)
+static lv_obj_t *surface(lv_obj_t *parent, int x, int y, int width, int height)
 {
-    int percent = radar_tier_percent(tier);
-    // Ideal 4-line QSPI payload: LCD_QSPI_HZ / 2 bytes per second, 2 bytes per pixel.
-    int theory = (int)(LCD_QSPI_HZ / 2.0 / (percent / 100.0 * LCD_WIDTH * LCD_HEIGHT * 2));
-    lv_label_set_text_fmt(tier_label, "%s %d%%  RGB565", tier == RADAR_TIER_FULL ? "Circle" : "Trail",
-                          percent);
-    lv_label_set_text_fmt(theory_label, "Bus limit %d FPS  |  QSPI %d MHz  |  FPS at right", theory,
-                          LCD_QSPI_HZ / 1000000);
-    lv_label_set_text(fps_label, "--");
-    lv_label_set_text(detail_label, "Settling...");
+    lv_obj_t *obj = lv_obj_create(parent);
+    lv_obj_remove_style_all(obj);
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_pos(obj, x, y);
+    lv_obj_set_size(obj, width, height);
+    return obj;
 }
 
-void ui_show_stats(const display_stats_t *display, const radar_stats_t *radar)
+static void rect(lv_layer_t *layer, int x, int y, int width, int height,
+                 uint32_t color, int radius, int border)
 {
-    // LVGL's built-in printf has no %f; format fixed-point by hand.
-    int mb = (int)(display->megabytes_per_second * 100), draw = (int)(radar->render_ms * 100);
-    lv_label_set_text_fmt(fps_label, "%d", (int)(display->fps + 0.5f));
-    lv_label_set_text_fmt(detail_label, "%d.%02d MB/s | bus %d%% | draw %d.%02d ms", mb / 100, mb % 100,
-                          (int)(display->bus_percent + 0.5f), draw / 100, draw % 100);
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.bg_color = lv_color_hex(color);
+    dsc.radius = radius;
+    dsc.border_width = border;
+    dsc.border_color = lv_color_hex(0xBBC5D0);
+    lv_area_t area = {x, y, x + width - 1, y + height - 1};
+    lv_draw_rect(layer, &dsc, &area);
 }
 
-void ui_show_touch(touch_status_t status)
+static void triangle(lv_layer_t *layer, int x1, int y1, int x2, int y2,
+                     int x3, int y3, uint32_t color)
 {
-    static bool error_pending;
-    static uint32_t last_error_ms;
-    if (status == TOUCH_STATUS_ERROR) {
-        last_error_ms = lv_tick_get();
-        error_pending = true;
-    } else if (error_pending && lv_tick_elaps(last_error_ms) >= 500) {
-        error_pending = false;
+    lv_draw_triangle_dsc_t dsc;
+    lv_draw_triangle_dsc_init(&dsc);
+    dsc.color = lv_color_hex(color);
+    dsc.p[0] = (lv_point_precise_t){x1, y1};
+    dsc.p[1] = (lv_point_precise_t){x2, y2};
+    dsc.p[2] = (lv_point_precise_t){x3, y3};
+    lv_draw_triangle(layer, &dsc);
+}
+
+static void draw_battery(lv_event_t *event)
+{
+    lv_area_t area;
+    lv_obj_get_coords(lv_event_get_target_obj(event), &area);
+    lv_layer_t *layer = lv_event_get_layer(event);
+    int x = area.x1, y = area.y1;
+    rect(layer, x + 141, y + 18, 7, 20, 0xBBC5D0, 2, 0);
+    rect(layer, x, y + 2, 142, 54, 0x17212B, 8, 3);
+    int fill_width = 132 * SAMPLE_SOC / 100;
+    rect(layer, x + 5, y + 7, fill_width, 44, GREEN, 3, 0);
+    for (int offset = 13; offset < fill_width; offset += 13) {
+        rect(layer, x + 5 + offset, y + 8, 1, 42, 0x179A3D, 0, 0);
     }
-    // Keep brief errors readable; a valid press still takes effect immediately.
-    if (status == TOUCH_STATUS_UP && error_pending) status = TOUCH_STATUS_ERROR;
-    if (status == shown_touch_status) return;
-    shown_touch_status = status;
-    const char *text = status == TOUCH_STATUS_DOWN ? "ON" : status == TOUCH_STATUS_UP ? "UP" :
-                       status == TOUCH_STATUS_ERROR ? "ERR" : "OFF";
-    uint32_t color = status == TOUCH_STATUS_DOWN ? 0x5AFFA4 : status == TOUCH_STATUS_ERROR ? 0xFF6B6B :
-                     0x9FB3C4;
-    lv_label_set_text(touch_label, text);
-    lv_obj_set_style_text_color(touch_label, lv_color_hex(color), 0);
+    if (state == CHARGING) {
+        triangle(layer, x + 70, y + 14, x + 54, y + 32, x + 68, y + 32, WHITE);
+        triangle(layer, x + 61, y + 45, x + 78, y + 26, x + 64, y + 26, WHITE);
+    } else if (state == DISCHARGING) {
+        rect(layer, x + 149, y + 25, 6, 8, PINK, 0, 0);
+        triangle(layer, x + 155, y + 20, x + 155, y + 38, x + 164, y + 29, PINK);
+    }
+}
+
+static void draw_trend(lv_event_t *event)
+{
+    lv_area_t area;
+    lv_obj_get_coords(lv_event_get_target_obj(event), &area);
+    lv_layer_t *layer = lv_event_get_layer(event);
+    int x = area.x1, y = area.y1;
+    unsigned example = state == CHARGING ? 0 : state == DISCHARGING ? 2 : 1;
+    const uint8_t *values = sample_trends[example];
+    int shade_start = example == 0 ? 150 : 79;
+    int shade_width = example == 0 ? 55 : 70;
+    rect(layer, x + shade_start, y, shade_width, 96, 0x102C19, 0, 0);
+    for (int row = 0; row <= 2; row++) rect(layer, x, y + row * 48, 282, 1, 0x242A27, 0, 0);
+    for (int col = 0; col <= 4; col++) rect(layer, x + col * 70, y, 1, 96, 0x202522, 0, 0);
+    for (int i = 0; i < TREND_POINTS; i++) {
+        int height = values[i] * 94 / 100;
+        uint32_t color = example != 0 ? GREEN : values[i] <= 25 ? PINK : values[i] <= 40 ? 0xE7CE4D : GREEN;
+        rect(layer, x + i * 282 / TREND_POINTS, y + 96 - height, 3, height, color, 0, 0);
+    }
+    // One centered bolt, separated from the interval line by a 4 px clearance.
+    int start = x + shade_start, center = start + shade_width / 2;
+    rect(layer, start, y + 106, center - 11 - start, 2, GREEN, 0, 0);
+    rect(layer, center + 11, y + 106, start + shade_width - center - 11, 2, GREEN, 0, 0);
+    triangle(layer, center + 4, y + 98, center - 7, y + 109, center + 2, y + 109, GREEN);
+    triangle(layer, center - 4, y + 115, center + 7, y + 104, center - 2, y + 104, GREEN);
+}
+
+static void align_units(void)
+{
+    lv_obj_update_layout(current_label);
+    lv_obj_align_to(current_unit, current_label, LV_ALIGN_OUT_RIGHT_BOTTOM, 4, -4);
+    lv_obj_align_to(voltage_unit, voltage_label, LV_ALIGN_OUT_RIGHT_BOTTOM, 4, -4);
+}
+
+void ui_show_sample(const ina226_sample_t *sample)
+{
+    ui_state_t next = !sample ? UNAVAILABLE : sample->current_a > IDLE_CURRENT_A ? CHARGING :
+                      sample->current_a < -IDLE_CURRENT_A ? DISCHARGING : IDLE;
+    uint32_t color = next == CHARGING ? BLUE : next == DISCHARGING ? PINK : WHITE;
+    lv_obj_set_style_bg_color(status_dot, lv_color_hex(next == UNAVAILABLE ? PINK : color), 0);
+    lv_obj_set_style_text_color(status_label, lv_color_hex(next == DISCHARGING || next == UNAVAILABLE ? PINK : WHITE), 0);
+    lv_obj_set_style_text_color(current_label, lv_color_hex(color), 0);
+    lv_obj_set_style_text_color(current_unit, lv_color_hex(color), 0);
+    lv_label_set_text(status_label, next == CHARGING ? "充电中" : next == DISCHARGING ? "放电中" :
+                                   next == IDLE ? "待机中" : "读取失败");
+    if (!sample) {
+        lv_label_set_text(current_label, "--");
+        lv_label_set_text(voltage_label, "--");
+        lv_label_set_text(power_label, "功率 -- W");
+    } else {
+        int milliamps = next == IDLE ? 0 : (int)lroundf(sample->current_a * 1000.0f);
+        char text[48];
+        snprintf(text, sizeof(text), milliamps > 0 ? "+%d" : "%d", milliamps);
+        lv_label_set_text(current_label, text);
+        snprintf(text, sizeof(text), "%.2f", (double)sample->voltage_v);
+        lv_label_set_text(voltage_label, text);
+        // Fixed reference time for this UI stage; no clock or accumulated energy yet.
+        snprintf(text, sizeof(text), "%s %.2f W", next == CHARGING ? "11:35 以来充入" :
+                 next == DISCHARGING ? "11:35 以来输出" : "功率",
+                 next == IDLE ? 0.0 : (double)fabsf(sample->voltage_v * sample->current_a));
+        lv_label_set_text(power_label, text);
+    }
+    align_units();
+    if (next != state) {
+        state = next;
+        const char *times[] = {"00:00", "06:00", "12:00", "18:00"};
+        for (int i = 0; i < 4; i++) lv_label_set_text(time_labels[i], times[(i + (next == CHARGING ? 3 : 0)) % 4]);
+        lv_obj_invalidate(battery);
+        lv_obj_invalidate(trend);
+    }
 }
 
 void ui_init(lv_display_t *display)
@@ -69,25 +181,42 @@ void ui_init(lv_display_t *display)
     lv_obj_t *screen = lv_display_get_screen_active(display);
     lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
     lv_obj_set_style_text_font(screen, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_pad_all(screen, 0, 0);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
-    // Text stays above y=88, where the radar circle starts.
-    tier_label = label(10, "", 0xFFFFFF);
-    lv_obj_set_style_text_font(tier_label, &lv_font_montserrat_24, 0);
-    theory_label = label(40, "", 0x9FB3C4);
-    detail_label = label(56, "", 0x9FB3C4);
-    label(72, "Swipe down: next | up: prev | BOOT: next", 0x5C7080);
-    // Fixed box right of the circle's lower edge (circle reaches x=282 at y=410)
-    // and inside the rounded corner, so LVGL never repaints radar pixels.
-    fps_label = lv_label_create(screen);
-    lv_obj_set_pos(fps_label, 286, 410);
-    lv_obj_set_width(fps_label, 44);
-    lv_obj_set_style_text_align(fps_label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_style_text_color(fps_label, lv_color_hex(0x5AFFA4), 0);
-    lv_label_set_text(fps_label, "--");
-    // Mirror the FPS box on the left, clear of both radar and rounded corner.
-    touch_label = lv_label_create(screen);
-    lv_obj_set_pos(touch_label, 38, 410);
-    lv_obj_set_width(touch_label, 44);
-    lv_obj_set_style_text_color(touch_label, lv_color_hex(0x9FB3C4), 0);
-    lv_label_set_text(touch_label, "OFF");
+    state = READING;
+
+    // Keep corner-adjacent content inside the panel's larger physical cutouts.
+    status_dot = surface(screen, 44, 32, 15, 15);
+    lv_obj_set_style_bg_opa(status_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(status_dot, lv_color_hex(MUTED), 0);
+    lv_obj_set_style_radius(status_dot, LV_RADIUS_CIRCLE, 0);
+    status_label = label(screen, 67, 31, "读取中", &font_ui_text_16, WHITE);
+
+    label(screen, 24, 68, "72", &font_ui_soc_88, WHITE);
+    label(screen, 136, 108, "%", &lv_font_montserrat_28, WHITE);
+    battery = surface(screen, 195, 76, 166, 58);
+    lv_obj_add_event_cb(battery, draw_battery, LV_EVENT_DRAW_MAIN, NULL);
+
+    label(screen, 26, 172, "电池电流", &font_ui_text_16, MUTED);
+    label(screen, 230, 172, "电池电压", &font_ui_text_16, MUTED);
+    current_label = label(screen, 26, 198, "--", &font_ui_numbers_36, WHITE);
+    current_unit = label(screen, 0, 0, "mA", &lv_font_montserrat_14, WHITE);
+    voltage_label = label(screen, 230, 198, "--", &font_ui_numbers_36, WHITE);
+    voltage_unit = label(screen, 0, 0, "V", &lv_font_montserrat_14, WHITE);
+    power_label = label(screen, 26, 243, "功率 -- W", &font_ui_text_16, MUTED);
+    lv_obj_t *divider = surface(screen, 198, 170, 1, 68);
+    lv_obj_set_style_bg_color(divider, lv_color_hex(0x242424), 0);
+    lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, 0);
+
+    label(screen, 26, 274, "电量趋势", &font_ui_text_16, WHITE);
+    lv_obj_t *period = label(screen, 0, 274, "过去24小时", &font_ui_text_16, MUTED);
+    lv_obj_align(period, LV_ALIGN_TOP_RIGHT, -25, 274);
+    trend = surface(screen, 26, 300, 283, 116);
+    lv_obj_add_event_cb(trend, draw_trend, LV_EVENT_DRAW_MAIN, NULL);
+    label(screen, 316, 296, "100%", &lv_font_montserrat_14, MUTED);
+    label(screen, 316, 344, "50%", &lv_font_montserrat_14, MUTED);
+    label(screen, 316, 392, "0%", &lv_font_montserrat_14, MUTED);
+    const char *times[] = {"00:00", "06:00", "12:00", "18:00"};
+    for (int i = 0; i < 4; i++) time_labels[i] = label(screen, 50 + i * 67, 419, times[i], &lv_font_montserrat_14, MUTED);
+    align_units();
 }

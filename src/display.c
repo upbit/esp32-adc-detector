@@ -34,10 +34,8 @@ typedef struct {
 
 typedef struct {
     spi_transaction_t trans; // First member: post_cb receives this pointer.
-    display_band_done_cb_t done;
+    void (*done)(void *context);
     void *context;
-    uint32_t pixel_bytes;
-    int64_t frame_start_us; // Set on a frame's last band only; 0 otherwise.
 } slot_t;
 
 // Vendor sequence verbatim (esp32_lcd_qspi_lvgl esp_lcd_tk018.c), verified on this
@@ -63,23 +61,14 @@ static slot_t slots[SLOT_COUNT];
 static unsigned next_slot;
 static SemaphoreHandle_t free_slots;
 static volatile uint32_t pending;
-static portMUX_TYPE stats_lock = portMUX_INITIALIZER_UNLOCKED;
-static uint32_t completed_frames, completed_bytes;
-static int64_t frame_total_us, frame_max_us, sample_start_us, open_frame_start_us;
+static portMUX_TYPE transfer_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static IRAM_ATTR void transfer_done(spi_transaction_t *trans)
 {
     slot_t *slot = (slot_t *)trans;
-    portENTER_CRITICAL_ISR(&stats_lock);
-    completed_bytes += slot->pixel_bytes;
-    if (slot->frame_start_us) {
-        int64_t elapsed = esp_timer_get_time() - slot->frame_start_us;
-        completed_frames++;
-        frame_total_us += elapsed;
-        if (elapsed > frame_max_us) frame_max_us = elapsed;
-    }
+    portENTER_CRITICAL_ISR(&transfer_lock);
     pending--;
-    portEXIT_CRITICAL_ISR(&stats_lock);
+    portEXIT_CRITICAL_ISR(&transfer_lock);
     if (slot->done) slot->done(slot->context);
     BaseType_t woken = pdFALSE;
     xSemaphoreGiveFromISR(free_slots, &woken);
@@ -99,9 +88,9 @@ static slot_t *take_slot(void)
 
 static void queue(slot_t *slot)
 {
-    portENTER_CRITICAL(&stats_lock);
+    portENTER_CRITICAL(&transfer_lock);
     pending++;
-    portEXIT_CRITICAL(&stats_lock);
+    portEXIT_CRITICAL(&transfer_lock);
     ESP_ERROR_CHECK(spi_device_queue_trans(device, &slot->trans, portMAX_DELAY));
 }
 
@@ -122,10 +111,10 @@ static void wait_idle(void)
     while (pending) vTaskDelay(1);
 }
 
-void display_queue_band(int x1, int y1, int x2, int y2, const void *pixels, bool frame_last,
-                        display_band_done_cb_t done, void *context)
+// Only the LVGL flush in the main task submits pixels; done runs in the SPI ISR.
+static void queue_band(int x1, int y1, int x2, int y2, const void *pixels,
+                       void (*done)(void *context), void *context)
 {
-    if (!open_frame_start_us) open_frame_start_us = esp_timer_get_time();
     size_t row_bytes = (x2 - x1) * 2;
     // One DMA transaction carries at most 2^18 bits (SPI_LL_DMA_MAX_BIT_LEN). Split by
     // rows, each with its own window, so no continuation-write command is needed.
@@ -137,22 +126,18 @@ void display_queue_band(int x1, int y1, int x2, int y2, const void *pixels, bool
         send_command(CMD_CASET, (uint8_t[]){x1 >> 8, x1 & 0xFF, (x2 - 1) >> 8, (x2 - 1) & 0xFF}, 4);
         send_command(CMD_RASET, (uint8_t[]){y >> 8, y & 0xFF, (end - 1) >> 8, (end - 1) & 0xFF}, 4);
         slot_t *slot = take_slot();
-        slot->pixel_bytes = (end - y) * row_bytes;
+        size_t pixel_bytes = (end - y) * row_bytes;
         slot->trans.cmd = LCD_SINGLE_WIRE ? OPCODE_COMMAND : OPCODE_PIXELS_QUAD;
         slot->trans.addr = CMD_RAMWR << 8;
         slot->trans.flags = LCD_SINGLE_WIRE ? 0 : SPI_TRANS_MODE_QIO;
-        slot->trans.length = slot->pixel_bytes * 8;
+        slot->trans.length = pixel_bytes * 8;
         slot->trans.tx_buffer = data;
         if (last) {
             slot->done = done;
             slot->context = context;
         }
-        if (last && frame_last) {
-            slot->frame_start_us = open_frame_start_us;
-            open_frame_start_us = 0;
-        }
         queue(slot);
-        data += slot->pixel_bytes;
+        data += pixel_bytes;
     }
 }
 
@@ -166,9 +151,7 @@ static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
 {
     size_t count = lv_area_get_size(area);
     lv_draw_sw_rgb565_swap(pixels, count); // CO5300 consumes big-endian RGB565.
-    // LVGL only draws text here; frame stats count radar frames, not LVGL refreshes.
-    display_queue_band(area->x1, area->y1, area->x2 + 1, area->y2 + 1, pixels, false,
-                       flush_done, display);
+    queue_band(area->x1, area->y1, area->x2 + 1, area->y2 + 1, pixels, flush_done, display);
 }
 
 static void round_area(lv_event_t *event)
@@ -184,52 +167,6 @@ static void round_area(lv_event_t *event)
 static uint32_t tick_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
-}
-
-static uint16_t test_pixel(int x, int y)
-{
-    static const uint16_t bars[] = {0xF800, 0x07E0, 0x001F, 0xFFFF, 0x0000};
-    if (y < LCD_HEIGHT * 2 / 5) return bars[x * 5 / LCD_WIDTH];
-    // Smooth ramps: every pixel differs from its neighbour, so any bit error from
-    // marginal QSPI timing shows as speckles instead of hiding in a regular pattern.
-    int band = (y - LCD_HEIGHT * 2 / 5) * 4 / (LCD_HEIGHT - LCD_HEIGHT * 2 / 5);
-    uint16_t r = x * 31 / (LCD_WIDTH - 1), g = x * 63 / (LCD_WIDTH - 1);
-    switch (band) {
-    case 0: return r << 11;
-    case 1: return g << 5;
-    case 2: return r;
-    default: return r << 11 | g << 5 | r;
-    }
-}
-
-static void give_semaphore(void *context)
-{
-    BaseType_t woken = pdFALSE;
-    xSemaphoreGiveFromISR(context, &woken);
-    if (woken) portYIELD_FROM_ISR();
-}
-
-// Single startup screen: R/G/B/W/K bars on top, red/green/blue/gray ramps below.
-static void test_pattern(uint16_t *buffer)
-{
-    SemaphoreHandle_t band_done = xSemaphoreCreateBinary();
-    assert(band_done);
-    ESP_LOGI("display", "Test pattern: color bars + RGB/gray ramps (3 seconds)");
-    for (int y = 0; y < LCD_HEIGHT; y += LCD_BUFFER_LINES) {
-        int end = y + LCD_BUFFER_LINES < LCD_HEIGHT ? y + LCD_BUFFER_LINES : LCD_HEIGHT;
-        for (int row = y; row < end; row++) {
-            for (int x = 0; x < LCD_WIDTH; x++) {
-                buffer[(row - y) * LCD_WIDTH + x] = __builtin_bswap16(test_pixel(x, row));
-            }
-        }
-        display_queue_band(0, y, LCD_WIDTH, end, buffer, false, give_semaphore, band_done);
-        if (xSemaphoreTake(band_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
-            ESP_LOGE("display", "Test pattern DMA timed out at row %d", y);
-            ESP_ERROR_CHECK(ESP_ERR_TIMEOUT);
-        }
-    }
-    vSemaphoreDelete(band_done);
-    vTaskDelay(pdMS_TO_TICKS(3000));
 }
 
 lv_display_t *display_init(void)
@@ -286,31 +223,8 @@ lv_display_t *display_init(void)
         wait_idle();
         vTaskDelay(pdMS_TO_TICKS(init_commands[i].delay_ms));
     }
-    test_pattern(first);
-    sample_start_us = esp_timer_get_time();
     ESP_LOGI("display", "%s %d MHz direct SPI, drive cap %d, %dx%d, two %u-byte internal DMA buffers",
              LCD_SINGLE_WIRE ? "1-wire SPI" : "QSPI", LCD_QSPI_HZ / 1000000, LCD_DRIVE_CAP,
              LCD_WIDTH, LCD_HEIGHT, (unsigned)buffer_size);
     return display;
-}
-
-display_stats_t display_take_stats(void)
-{
-    int64_t now = esp_timer_get_time();
-    portENTER_CRITICAL(&stats_lock);
-    uint32_t frames = completed_frames, bytes = completed_bytes;
-    int64_t total = frame_total_us, maximum = frame_max_us;
-    completed_frames = completed_bytes = 0;
-    frame_total_us = frame_max_us = 0;
-    portEXIT_CRITICAL(&stats_lock);
-    double seconds = (now - sample_start_us) / 1000000.0;
-    sample_start_us = now;
-    double bytes_per_second = seconds > 0 ? bytes / seconds : 0;
-    return (display_stats_t) {
-        .fps = seconds > 0 ? frames / seconds : 0,
-        .megabytes_per_second = bytes_per_second / 1000000.0,
-        .bus_percent = bytes_per_second / (LCD_QSPI_HZ / 2.0) * 100.0, // 4 bits per clock.
-        .average_ms = frames ? total / (frames * 1000.0) : 0,
-        .maximum_ms = maximum / 1000.0,
-    };
 }

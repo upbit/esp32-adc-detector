@@ -68,7 +68,7 @@ esp_err_t touch_init(void)
         i2c_del_master_bus(bus);
         return err;
     }
-    ESP_LOGI("touch", "CHSC6417 at 0x2E, SDA=%d SCL=%d; swipe then release to change tier",
+    ESP_LOGI("touch", "CHSC6417 at 0x2E, SDA=%d SCL=%d; touch/swipe logging enabled",
              TOUCH_PIN_SDA, TOUCH_PIN_SCL);
     current_status = TOUCH_STATUS_UP;
     return ESP_OK;
@@ -89,7 +89,8 @@ touch_swipe_t touch_poll(touch_status_t *status)
     esp_err_t err = i2c_master_transmit_receive(device, &reg, 1, data, sizeof(data), 10);
     if (err != ESP_OK) {
         *status = current_status = TOUCH_STATUS_ERROR;
-        if (!read_failed) ESP_LOGW("touch", "Read failed: %s; gesture cancelled", esp_err_to_name(err));
+        // Temporarily quiet the known intermittent read error during UI bring-up.
+        if (!read_failed) ESP_LOGD("touch", "Read failed: %s; gesture cancelled", esp_err_to_name(err));
         read_failed = true;
         cancelled = true;
         return TOUCH_SWIPE_NONE;
