@@ -2,8 +2,9 @@
 
 #include "lvgl.h"
 
-#include "ina226.h"
+#include "battery.h"
 
 void ui_init(lv_display_t *display);
-// NULL clears the live readings after an INA226 initialization/read failure.
-void ui_show_sample(const ina226_sample_t *sample);
+void ui_show_battery(const battery_reading_t *reading);
+// Main-task-only; hit testing is restricted to the cumulative reading area.
+void ui_handle_tap(int x, int y);

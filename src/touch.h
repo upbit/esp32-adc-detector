@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+
 #include "esp_err.h"
 
 typedef enum {
@@ -15,8 +17,15 @@ typedef enum {
     TOUCH_STATUS_ERROR,
 } touch_status_t;
 
+typedef struct {
+    bool detected;
+    int x;
+    int y;
+} touch_tap_t;
+
 // Called once at startup. On failure, touch_poll() remains disabled.
 esp_err_t touch_init(void);
 // Display task only; samples at most every 10 ms and emits an event on release.
 // Always writes the latest raw contact/read status, including between samples.
-touch_swipe_t touch_poll(touch_status_t *status);
+// Optional tap output: a short single contact with <=12 px motion, emitted on release.
+touch_swipe_t touch_poll(touch_status_t *status, touch_tap_t *tap);

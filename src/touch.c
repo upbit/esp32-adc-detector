@@ -74,12 +74,13 @@ esp_err_t touch_init(void)
     return ESP_OK;
 }
 
-touch_swipe_t touch_poll(touch_status_t *status)
+touch_swipe_t touch_poll(touch_status_t *status, touch_tap_t *tap)
 {
-    static int64_t last_poll;
+    static int64_t last_poll, pressed_at;
     static bool down, cancelled, read_failed;
-    static int start_x, start_y, last_x, last_y;
+    static int start_x, start_y, last_x, last_y, max_motion;
     int64_t now = esp_timer_get_time();
+    if (tap) *tap = (touch_tap_t){0};
     *status = current_status;
     if (!device || now - last_poll < 10000) return TOUCH_SWIPE_NONE;
     last_poll = now;
@@ -107,8 +108,12 @@ touch_swipe_t touch_poll(touch_status_t *status)
         if (!down) {
             start_x = x;
             start_y = y;
+            pressed_at = now;
+            max_motion = 0;
             down = true;
         }
+        int motion = abs(x - start_x) > abs(y - start_y) ? abs(x - start_x) : abs(y - start_y);
+        if (motion > max_motion) max_motion = motion;
         last_x = x;
         last_y = y;
         return TOUCH_SWIPE_NONE;
@@ -120,6 +125,8 @@ touch_swipe_t touch_poll(touch_status_t *status)
         if (abs(dy) >= SWIPE_MIN_PIXELS && abs(dy) * 2 >= abs(dx) * 3) {
             swipe = dy > 0 ? TOUCH_SWIPE_DOWN : TOUCH_SWIPE_UP;
             ESP_LOGI("touch", "Swipe %s, dx=%d dy=%d", dy > 0 ? "down" : "up", dx, dy);
+        } else if (tap && max_motion <= 12 && now - pressed_at <= 500000) {
+            *tap = (touch_tap_t){.detected = true, .x = start_x, .y = start_y};
         }
     }
     down = cancelled = false;

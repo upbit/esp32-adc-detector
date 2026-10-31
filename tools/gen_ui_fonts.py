@@ -19,9 +19,10 @@ def main():
     bold = LVGL / "tests/src/test_files/fonts/Montserrat-Bold.ttf"
     chinese = LVGL / "scripts/built_in_font/SourceHanSansSC-Normal.otf"
     fonts = [
-        ("text_16", chinese, 16, "充电中待机放池流压量趋势过去小时功率入输出读取失败以来"),
+        ("text_16", chinese, 16, "充电中待机放池流压量趋势过去小时功率入输出读取失败以来本次累计"),
         ("numbers_36", bold, 36, "+-.0123456789"),
-        ("soc_88", bold, 88, "0123456789"),
+        ("soc_88", bold, 88, "-0123456789"),
+        ("soc_64", bold, 64, "0123456789"),
     ]
     for name, source, size, symbols in fonts:
         output = ROOT / "src/fonts" / f"font_ui_{name}.c"

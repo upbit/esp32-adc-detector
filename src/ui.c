@@ -6,14 +6,13 @@
 LV_FONT_DECLARE(font_ui_text_16);
 LV_FONT_DECLARE(font_ui_numbers_36);
 LV_FONT_DECLARE(font_ui_soc_88);
+LV_FONT_DECLARE(font_ui_soc_64);
 
 #define WHITE 0xF5F6F7
 #define MUTED 0xA6ABAF
 #define BLUE 0x26A8F7
 #define PINK 0xFF738D
 #define GREEN 0x35D85A
-#define SAMPLE_SOC 72
-#define IDLE_CURRENT_A 0.001f
 #define TREND_POINTS 48
 
 typedef enum { READING, CHARGING, IDLE, DISCHARGING, UNAVAILABLE } ui_state_t;
@@ -22,8 +21,11 @@ static ui_state_t state = READING;
 static lv_obj_t *status_dot, *status_label, *current_label, *current_unit;
 static lv_obj_t *voltage_label, *voltage_unit, *power_label, *battery, *trend;
 static lv_obj_t *time_labels[4];
+static lv_obj_t *soc_label, *soc_unit;
+static battery_reading_t shown_reading;
+static bool show_mah;
 
-// Design-reference data only, not estimated SOC or recorded INA226 history.
+// Trend history remains reference data until the history/time stage.
 static const uint8_t sample_trends[3][TREND_POINTS] = {
     {60,57,54,51,47,44,41,37,33,29,26,23,21,20,19,20,
      21,23,25,28,31,34,37,40,43,45,47,49,51,53,54,55,
@@ -91,8 +93,10 @@ static void draw_battery(lv_event_t *event)
     int x = area.x1, y = area.y1;
     rect(layer, x + 141, y + 18, 7, 20, 0xBBC5D0, 2, 0);
     rect(layer, x, y + 2, 142, 54, 0x17212B, 8, 3);
-    int fill_width = 132 * SAMPLE_SOC / 100;
-    rect(layer, x + 5, y + 7, fill_width, 44, GREEN, 3, 0);
+    int fill_percent = shown_reading.valid ? shown_reading.percent : 0;
+    if (fill_percent >= 90) fill_percent = 100; // Coarse full icon, not a full-charge claim.
+    int fill_width = 132 * fill_percent / 100;
+    if (fill_width) rect(layer, x + 5, y + 7, fill_width, 44, GREEN, 3, 0);
     for (int offset = 13; offset < fill_width; offset += 13) {
         rect(layer, x + 5 + offset, y + 8, 1, 42, 0x179A3D, 0, 0);
     }
@@ -138,35 +142,54 @@ static void align_units(void)
     lv_obj_align_to(voltage_unit, voltage_label, LV_ALIGN_OUT_RIGHT_BOTTOM, 4, -4);
 }
 
-void ui_show_sample(const ina226_sample_t *sample)
+void ui_show_battery(const battery_reading_t *reading)
 {
-    ui_state_t next = !sample ? UNAVAILABLE : sample->current_a > IDLE_CURRENT_A ? CHARGING :
-                      sample->current_a < -IDLE_CURRENT_A ? DISCHARGING : IDLE;
+    bool soc_changed = reading->valid != shown_reading.valid || reading->percent != shown_reading.percent;
+    shown_reading = *reading;
+    const ina226_sample_t *sample = &reading->sample;
+    ui_state_t next = !reading->valid ? UNAVAILABLE : reading->state == BATTERY_CHARGING ? CHARGING :
+                      reading->state == BATTERY_DISCHARGING ? DISCHARGING : IDLE;
     uint32_t color = next == CHARGING ? BLUE : next == DISCHARGING ? PINK : WHITE;
+    uint32_t current_color = !reading->valid ? WHITE :
+                             sample->current_a > BATTERY_CURRENT_THRESHOLD_A ? BLUE :
+                             sample->current_a < -BATTERY_CURRENT_THRESHOLD_A ? PINK : WHITE;
     lv_obj_set_style_bg_color(status_dot, lv_color_hex(next == UNAVAILABLE ? PINK : color), 0);
     lv_obj_set_style_text_color(status_label, lv_color_hex(next == DISCHARGING || next == UNAVAILABLE ? PINK : WHITE), 0);
-    lv_obj_set_style_text_color(current_label, lv_color_hex(color), 0);
-    lv_obj_set_style_text_color(current_unit, lv_color_hex(color), 0);
+    lv_obj_set_style_text_color(current_label, lv_color_hex(current_color), 0);
+    lv_obj_set_style_text_color(current_unit, lv_color_hex(current_color), 0);
     lv_label_set_text(status_label, next == CHARGING ? "充电中" : next == DISCHARGING ? "放电中" :
                                    next == IDLE ? "待机中" : "读取失败");
-    if (!sample) {
+    if (!reading->valid) {
         lv_label_set_text(current_label, "--");
         lv_label_set_text(voltage_label, "--");
-        lv_label_set_text(power_label, "功率 -- W");
+        lv_label_set_text(soc_label, "--");
+        lv_obj_set_style_text_font(soc_label, &font_ui_soc_88, 0);
+        lv_obj_set_y(soc_label, 68);
     } else {
-        int milliamps = next == IDLE ? 0 : (int)lroundf(sample->current_a * 1000.0f);
+        int milliamps = fabsf(sample->current_a) <= BATTERY_CURRENT_THRESHOLD_A ? 0 :
+                       (int)lroundf(sample->current_a * 1000.0f);
         char text[48];
         snprintf(text, sizeof(text), milliamps > 0 ? "+%d" : "%d", milliamps);
         lv_label_set_text(current_label, text);
         snprintf(text, sizeof(text), "%.2f", (double)sample->voltage_v);
         lv_label_set_text(voltage_label, text);
-        // Fixed reference time for this UI stage; no clock or accumulated energy yet.
-        snprintf(text, sizeof(text), "%s %.2f W", next == CHARGING ? "11:35 以来充入" :
-                 next == DISCHARGING ? "11:35 以来输出" : "功率",
-                 next == IDLE ? 0.0 : (double)fabsf(sample->voltage_v * sample->current_a));
+        lv_obj_set_style_text_font(soc_label, reading->percent == 100 ? &font_ui_soc_64 : &font_ui_soc_88, 0);
+        lv_obj_set_y(soc_label, 68 + (reading->percent == 100 ?
+                     font_ui_soc_88.line_height - font_ui_soc_64.line_height : 0));
+        snprintf(text, sizeof(text), "%d", reading->percent);
+        lv_label_set_text(soc_label, text);
+    }
+    if (next == IDLE || next == UNAVAILABLE) {
+        lv_obj_add_flag(power_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        char text[48];
+        snprintf(text, sizeof(text), "%s %.2f %s", next == CHARGING ? "本次充入" : "本次输出",
+                 show_mah ? reading->session_mah : reading->session_wh, show_mah ? "mAh" : "Wh");
         lv_label_set_text(power_label, text);
+        lv_obj_remove_flag(power_label, LV_OBJ_FLAG_HIDDEN);
     }
     align_units();
+    if (soc_changed) lv_obj_invalidate(battery);
     if (next != state) {
         state = next;
         const char *times[] = {"00:00", "06:00", "12:00", "18:00"};
@@ -174,6 +197,14 @@ void ui_show_sample(const ina226_sample_t *sample)
         lv_obj_invalidate(battery);
         lv_obj_invalidate(trend);
     }
+}
+
+void ui_handle_tap(int x, int y)
+{
+    if (lv_obj_has_flag(power_label, LV_OBJ_FLAG_HIDDEN)) return;
+    if (x < 26 || x >= 343 || y < 235 || y >= 270) return;
+    show_mah = !show_mah;
+    ui_show_battery(&shown_reading);
 }
 
 void ui_init(lv_display_t *display)
@@ -184,6 +215,8 @@ void ui_init(lv_display_t *display)
     lv_obj_set_style_pad_all(screen, 0, 0);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
     state = READING;
+    shown_reading = (battery_reading_t){0};
+    show_mah = false;
 
     // Keep corner-adjacent content inside the panel's larger physical cutouts.
     status_dot = surface(screen, 44, 32, 15, 15);
@@ -192,8 +225,9 @@ void ui_init(lv_display_t *display)
     lv_obj_set_style_radius(status_dot, LV_RADIUS_CIRCLE, 0);
     status_label = label(screen, 67, 31, "读取中", &font_ui_text_16, WHITE);
 
-    label(screen, 24, 68, "72", &font_ui_soc_88, WHITE);
-    label(screen, 136, 108, "%", &lv_font_montserrat_28, WHITE);
+    soc_label = label(screen, 24, 68, "--", &font_ui_soc_88, WHITE);
+    lv_obj_set_width(soc_label, 126);
+    soc_unit = label(screen, 154, 108, "%", &lv_font_montserrat_28, WHITE);
     battery = surface(screen, 195, 76, 166, 58);
     lv_obj_add_event_cb(battery, draw_battery, LV_EVENT_DRAW_MAIN, NULL);
 
@@ -203,7 +237,8 @@ void ui_init(lv_display_t *display)
     current_unit = label(screen, 0, 0, "mA", &lv_font_montserrat_14, WHITE);
     voltage_label = label(screen, 230, 198, "--", &font_ui_numbers_36, WHITE);
     voltage_unit = label(screen, 0, 0, "V", &lv_font_montserrat_14, WHITE);
-    power_label = label(screen, 26, 243, "功率 -- W", &font_ui_text_16, MUTED);
+    power_label = label(screen, 26, 243, "", &font_ui_text_16, MUTED);
+    lv_obj_add_flag(power_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_t *divider = surface(screen, 198, 170, 1, 68);
     lv_obj_set_style_bg_color(divider, lv_color_hex(0x242424), 0);
     lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, 0);
