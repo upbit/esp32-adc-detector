@@ -16,4 +16,7 @@
 #define LCD_PIN_RST (-1) // Module's RC power-on reset; use software reset.
 #define TOUCH_PIN_SCL 8 // CHSC6417 I²C, shared module power-on reset.
 #define TOUCH_PIN_SDA 7
+#define INA226_PIN_SDA 38 // Independent I2C bus; touch remains on GPIO7/8.
+#define INA226_PIN_SCL 47
+#define INA226_PIN_ALERT 39 // Wired but unused; no ALERT interrupt in this stage.
 #define LCD_BUFFER_LINES 48

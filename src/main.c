@@ -8,7 +8,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "board.h"
 #include "display.h"
+#include "ina226.h"
 #include "radar.h"
 #include "touch.h"
 #include "ui.h"
@@ -64,6 +66,20 @@ static void report(void)
              (double)display.average_ms, (double)display.maximum_ms, (double)radar.render_ms);
 }
 
+static void report_battery(void)
+{
+    ina226_sample_t sample;
+    esp_err_t err = ina226_read(&sample);
+    if (err != ESP_OK) {
+        ESP_LOGW("battery", "INA226 read failed: %s; sample omitted (check calibration / range / wiring)",
+                 esp_err_to_name(err));
+        return;
+    }
+    // raw undoes the gain only to collect linearity points; remove once calibration is settled.
+    ESP_LOGI("battery", "VBUS=%.3f V (raw %.4f), I=%+.2f mA (+ charge / - discharge)",
+             (double)sample.voltage_v, (double)(sample.voltage_v / INA226_BUS_VOLTAGE_GAIN), (double)(sample.current_a * 1000.0f));
+}
+
 void app_main(void)
 {
     esp_chip_info_t chip;
@@ -83,6 +99,11 @@ void app_main(void)
         ESP_LOGW("main", "Touch disabled: %s (SCL GPIO8 / SDA GPIO7); BOOT remains available",
                  esp_err_to_name(touch_err));
     }
+    esp_err_t ina226_err = ina226_init();
+    if (ina226_err != ESP_OK) {
+        ESP_LOGW("main", "INA226 disabled: %s (0x44, SDA GPIO%d / SCL GPIO%d); display remains available",
+                 esp_err_to_name(ina226_err), INA226_PIN_SDA, INA226_PIN_SCL);
+    }
     radar_init();
     apply_tier();
     // Display task (core 0): radar bands, LVGL text and stats share one SPI queue.
@@ -99,6 +120,7 @@ void app_main(void)
         if (now - last_report >= 1000000) {
             last_report = now;
             report();
+            if (ina226_err == ESP_OK) report_battery();
         }
     }
 }
