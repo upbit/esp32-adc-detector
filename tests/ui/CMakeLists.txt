@@ -12,5 +12,6 @@ add_executable(network_ui_test network_ui_test.c
 target_sources(network_ui_test PRIVATE "${REPO}/src/fonts/font_ui_actions_24.c")
 target_include_directories(network_ui_test PRIVATE "${REPO}/src" "${REPO}/tests/host")
 target_compile_definitions(network_ui_test PRIVATE UI_SOURCE="${REPO}/src/ui.c")
+target_compile_definitions(network_ui_test PRIVATE _POSIX_C_SOURCE=200809L)
 target_compile_options(network_ui_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(network_ui_test PRIVATE lvgl m)

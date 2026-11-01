@@ -8,6 +8,7 @@
 
 #include "board.h"
 #include "battery.h"
+#include "history.h"
 #include "display.h"
 #include "ina226.h"
 #include "touch.h"
@@ -16,6 +17,7 @@
 #include "time/clock.h"
 
 static battery_monitor_t battery_monitor;
+static history_view_t history_day, history_week;
 
 static void report_stack(void)
 {
@@ -40,7 +42,7 @@ static void log_touch(void)
         if (action == UI_ACTION_OPEN_WIFI) wifi_open_portal(now);
         else if (action == UI_ACTION_CANCEL_WIFI) wifi_cancel(now);
         else if (action == UI_ACTION_SYNC_TIME) wifi_sync_time(now);
-        else ui_handle_tap(tap.x, tap.y);
+        else ui_handle_history_tap(tap.x, tap.y, now);
     }
     // Compare valid contacts only; recovery from an I2C error is not a release.
     if (status == TOUCH_STATUS_ERROR || status == TOUCH_STATUS_OFF) return;
@@ -51,12 +53,18 @@ static void log_touch(void)
     }
 }
 
-static void report_battery(void)
+static void report_battery(int64_t timestamp)
 {
     ina226_sample_t sample;
     esp_err_t err = ina226_read(&sample);
     battery_update(&battery_monitor, err == ESP_OK ? &sample : NULL, esp_timer_get_time());
     ui_show_battery(&battery_monitor.reading);
+    history_state_t direction = battery_monitor.reading.state == BATTERY_CHARGING ? HISTORY_CHARGING :
+                                battery_monitor.reading.state == BATTERY_DISCHARGING ? HISTORY_DISCHARGING : HISTORY_IDLE;
+    history_sample_t entry = {.timestamp = timestamp, .percent = battery_monitor.filtered_percent,
+                             .valid = battery_monitor.reading.valid, .state = direction,
+                             .expected_interval_seconds = 1};
+    history_add(&entry);
     if (err != ESP_OK) {
         ESP_LOGW("battery", "INA226 read failed: %s; sample omitted (check calibration / range / wiring)",
                  esp_err_to_name(err));
@@ -65,9 +73,8 @@ static void report_battery(void)
     // raw undoes the gain only to collect linearity points; remove once calibration is settled.
     ESP_LOGI("battery", "VBUS=%.3f V (raw %.4f), I=%+.2f mA (+ charge / - discharge)",
              (double)sample.voltage_v, (double)(sample.voltage_v / INA226_BUS_VOLTAGE_GAIN), (double)(sample.current_a * 1000.0f));
-    ESP_LOGI("battery", "SOC~%d%% state=%d, session=%.4f Wh / %.2f mAh",
-             battery_monitor.reading.percent, battery_monitor.reading.state,
-             battery_monitor.reading.session_wh, battery_monitor.reading.session_mah);
+    ESP_LOGI("battery", "SOC~%d%% state=%d",
+             battery_monitor.reading.percent, battery_monitor.reading.state);
 }
 
 void app_main(void)
@@ -95,9 +102,11 @@ void app_main(void)
                  esp_err_to_name(ina226_err), INA226_PIN_SDA, INA226_PIN_SCL);
     }
     clock_init();
+    history_init(); // Separate partition; initialization failure never erases stored data.
     esp_err_t wifi_err = wifi_init();
     if (wifi_err != ESP_OK) ESP_LOGW("main", "Wi-Fi unavailable: %s; existing display/sampling unaffected", esp_err_to_name(wifi_err));
     int64_t last_report = esp_timer_get_time();
+    int64_t previous_wall = 0, previous_wall_us = 0;
     for (;;) {
         log_touch();
         lv_timer_handler();
@@ -110,7 +119,23 @@ void app_main(void)
         ui_show_network(&wifi, &clock);
         if (now - last_report >= 1000000) {
             last_report = now;
-            if (ina226_err == ESP_OK) report_battery();
+            int64_t timestamp = clock.valid ? clock.timestamp : 0;
+            if (timestamp && previous_wall) {
+                int64_t difference = (timestamp - previous_wall) * 1000000 - (now - previous_wall_us);
+                if (difference > 5000000 || difference < -5000000) {
+                    history_reset_time();
+                    ESP_LOGW("history", "Clock discontinuity; unfinished window reset, committed history retained");
+                }
+            }
+            previous_wall = timestamp;
+            previous_wall_us = now;
+            history_commit(); // Retry a failed earlier write before trying to close another window.
+            history_advance(timestamp);
+            history_commit();
+            if (ina226_err == ESP_OK) report_battery(timestamp);
+            history_query(timestamp, false, &history_day);
+            history_query(timestamp, true, &history_week);
+            ui_show_history(&history_day, &history_week);
             report_stack();
         }
         vTaskDelay(pdMS_TO_TICKS(5));

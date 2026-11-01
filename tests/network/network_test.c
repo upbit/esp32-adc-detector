@@ -125,7 +125,7 @@ int main(void)
 {
     reset(false);
     wifi_poll(100); wifi_poll(RETRY_US * 3); off(); assert(init_count == 0);
-    clock_view_t clock; clock_get_view(100, &clock); assert(!clock.valid && !clock.text[0]);
+    clock_view_t clock; clock_get_view(100, &clock); assert(!clock.valid && !clock.text[0] && !clock.timestamp);
     wifi_sync_time(RETRY_US * 3 + 100); off(); assert(init_count == 0 && next_attempt == 0);
 
     wifi_open_portal(100); assert(rf && http && view.portal && !view.connected);
@@ -136,6 +136,7 @@ int main(void)
     emit(GOT_IP, 600); assert(sntp && have_saved && !view.portal && !strcmp(persisted.ssid, "NewNetwork"));
     synchronized_at(3000600); off(); assert(stop_count == 1 && deinit_count == 1);
     clock_get_view(3000600, &clock); assert(clock.valid && clock.feedback == CLOCK_SYNCED && strlen(clock.text) == 5);
+    assert(clock.timestamp == wall);
     clock_get_view(5000599, &clock); assert(clock.feedback == CLOCK_SYNCED);
     clock_get_view(5000600, &clock); assert(clock.feedback == CLOCK_NORMAL);
     int64_t due = next_attempt;

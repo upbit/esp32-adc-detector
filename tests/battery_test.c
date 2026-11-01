@@ -101,63 +101,46 @@ static void test_thresholds_and_confirmation(void)
     assert(monitor.reading.state == BATTERY_IDLE);
     run(&monitor, 66, 131, -BATTERY_CURRENT_THRESHOLD_A);
     assert(monitor.reading.state == BATTERY_IDLE);
-    near(monitor.reading.session_mah, 0);
 
     run(&monitor, 132, 191, 0.011f);
     assert(monitor.reading.state == BATTERY_IDLE);
     sample(&monitor, 192, 4, 0.011f);
     assert(monitor.reading.state == BATTERY_CHARGING);
-    assert(monitor.reading.session_start_us == 132000000);
-    near(monitor.reading.session_mah, 11.0 * 60 / 3600);
+    assert(monitor.candidate_since_us == 132000000);
 
-    double mah = monitor.reading.session_mah;
     run(&monitor, 193, 252, 0.005f);
     assert(monitor.reading.state == BATTERY_CHARGING);
-    near(monitor.reading.session_mah, mah); // Pause immediately, even before idle confirmation.
     sample(&monitor, 253, 4, 0);
     assert(monitor.reading.state == BATTERY_IDLE);
-    assert(monitor.reading.session_end_us == 193000000);
-    near(monitor.reading.session_mah, mah);
+    assert(monitor.candidate_since_us == 193000000);
 }
 
-static void test_integration_and_sessions(void)
+static void test_reversals_and_idle(void)
 {
     battery_monitor_t monitor;
     battery_init(&monitor);
-    run(&monitor, 0, 3600, 1.0f);
+    run(&monitor, 0, 60, 1.0f);
     assert(monitor.reading.state == BATTERY_CHARGING);
-    near(monitor.reading.session_mah, 1000);
-    near(monitor.reading.session_wh, 4);
-    double mah = monitor.reading.session_mah;
 
-    run(&monitor, 3601, 3610, 0);
-    near(monitor.reading.session_mah, mah);
-    sample(&monitor, 3611, 4, 1);
+    run(&monitor, 61, 70, 0);
     assert(monitor.reading.state == BATTERY_CHARGING);
-    assert(monitor.reading.session_start_us == 0);
-    near(monitor.reading.session_mah, mah);
-    sample(&monitor, 3612, 4, 1);
-    near(monitor.reading.session_mah, mah + 1000.0 / 3600);
+    sample(&monitor, 71, 4, 1);
+    assert(monitor.reading.state == BATTERY_CHARGING);
+    assert(monitor.candidate == BATTERY_CHARGING && monitor.candidate_since_us == 71000000);
 
-    run(&monitor, 3613, 3672, -1);
+    run(&monitor, 72, 131, -1);
     assert(monitor.reading.state == BATTERY_CHARGING);
-    sample(&monitor, 3673, 4, -1);
+    sample(&monitor, 132, 4, -1);
     assert(monitor.reading.state == BATTERY_DISCHARGING);
-    assert(monitor.reading.session_start_us == 3613000000);
-    near(monitor.reading.session_mah, 1000.0 * 60 / 3600);
-    near(monitor.reading.session_wh, 4.0 * 60 / 3600);
-    run(&monitor, 3674, 3734, 0);
+    assert(monitor.candidate_since_us == 72000000);
+    run(&monitor, 133, 192, 0);
+    assert(monitor.reading.state == BATTERY_DISCHARGING);
+    sample(&monitor, 193, 4, 0);
     assert(monitor.reading.state == BATTERY_IDLE);
-    run(&monitor, 3735, 3795, 2);
+    run(&monitor, 194, 254, 2);
     assert(monitor.reading.state == BATTERY_CHARGING);
-    assert(monitor.reading.session_start_us == 3735000000);
-    near(monitor.reading.session_mah, 2000.0 * 60 / 3600);
-    near(monitor.reading.session_wh, 8.0 * 60 / 3600);
-
-    // Trapezoidal integration of actual power and elapsed time, not nominal 1-second ticks.
-    sample(&monitor, 3796.5, 4.2f, 1);
-    near(monitor.reading.session_mah, 2000.0 * 60 / 3600 + 1500 * 1.5 / 3600);
-    near(monitor.reading.session_wh, 8.0 * 60 / 3600 + (8.0 + 4.2) / 2 * 1.5 / 3600);
+    battery_init(&monitor);
+    assert(!monitor.reading.valid && monitor.reading.state == BATTERY_IDLE);
 }
 
 static void test_missing_samples(void)
@@ -170,13 +153,12 @@ static void test_missing_samples(void)
     assert(monitor.reading.state == BATTERY_IDLE);
     sample(&monitor, 92, 4, 1);
     assert(monitor.reading.state == BATTERY_CHARGING);
-    assert(monitor.reading.session_start_us == 32000000);
-    double mah = monitor.reading.session_mah;
+    assert(monitor.candidate_since_us == 32000000);
     battery_update(&monitor, NULL, 93000000);
+    assert(!monitor.reading.valid && !monitor.have_previous);
     sample(&monitor, 1000, 4, 1);
-    near(monitor.reading.session_mah, mah);
-    sample(&monitor, 1001, 4, 1);
-    near(monitor.reading.session_mah, mah + 1000.0 / 3600);
+    assert(monitor.reading.valid && monitor.reading.state == BATTERY_CHARGING);
+    assert(monitor.candidate_since_us == 1000000000);
 
     run(&monitor, 1002, 1050, 0);
     sample(&monitor, 1100, 4, 0); // An unsampled gap resets the 60-second confirmation.
@@ -200,7 +182,48 @@ static void test_missing_samples(void)
     run(&monitor, 51, 110, 1);
     assert(monitor.reading.state == BATTERY_IDLE);
     sample(&monitor, 111, 4, 1);
-    near(monitor.reading.session_mah, 1000.0 * 60 / 3600);
+    assert(monitor.reading.state == BATTERY_CHARGING);
+    assert(monitor.candidate_since_us == 51000000);
+    sample(&monitor, 112, INFINITY, 1);
+    assert(!monitor.reading.valid && !monitor.have_previous);
+    sample(&monitor, 113, 4, 1);
+    assert(monitor.reading.valid && monitor.reading.state == BATTERY_CHARGING);
+}
+
+static void test_timing_and_low_frequency(void)
+{
+    battery_monitor_t monitor;
+    battery_init(&monitor);
+    for (int tick = 0; tick < 40; tick++) sample(&monitor, tick * 1.5, 4, 1);
+    assert(monitor.reading.state == BATTERY_IDLE);
+    sample(&monitor, 60, 4, 1);
+    assert(monitor.reading.state == BATTERY_CHARGING);
+
+    battery_init(&monitor);
+    run(&monitor, 0, 59, 1);
+    sample(&monitor, 61.5, 4, 1); // Exactly 2.5 seconds still establishes continuity.
+    assert(monitor.reading.state == BATTERY_CHARGING);
+    battery_init(&monitor);
+    run(&monitor, 0, 59, 1);
+    ina226_sample_t value = {.voltage_v = 4, .current_a = 1};
+    battery_update(&monitor, &value, INT64_C(61500001));
+    assert(monitor.reading.state == BATTERY_IDLE);
+    assert(monitor.candidate_since_us == 61500001);
+
+    battery_update(&monitor, &value, INT64_C(61500001)); // Duplicate timestamps reset evidence.
+    assert(monitor.reading.state == BATTERY_IDLE);
+    sample(&monitor, 60, 4, 1);
+    run(&monitor, 61, 119, 1);
+    assert(monitor.reading.state == BATTERY_IDLE);
+    sample(&monitor, 120, 4, 1);
+    assert(monitor.reading.state == BATTERY_CHARGING);
+
+    battery_init(&monitor);
+    for (int i = 0; i <= 6; i++) {
+        sample(&monitor, i * 600, 4, 1);
+        assert(monitor.reading.valid && monitor.reading.state == BATTERY_IDLE);
+        assert(monitor.reading.percent == shown_percent(4));
+    }
 }
 
 int main(void)
@@ -208,8 +231,9 @@ int main(void)
     test_curve();
     test_system_percent();
     test_thresholds_and_confirmation();
-    test_integration_and_sessions();
+    test_reversals_and_idle();
     test_missing_samples();
-    puts("PASS: voltage curve, 4.10 V system 99% cap, smoothing, 10 mA boundaries, 60 s confirmation, Wh/mAh, reversals and missing samples");
+    test_timing_and_low_frequency();
+    puts("PASS: voltage curve, 4.10 V system 99% cap, smoothing, 10 mA boundaries, 60 s confirmation, reversals, missing samples and sparse sampling");
     return 0;
 }

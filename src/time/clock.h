@@ -7,6 +7,7 @@
 typedef enum { CLOCK_NORMAL, CLOCK_SYNCED, CLOCK_FAILED } clock_feedback_t;
 typedef struct {
     bool valid;
+    int64_t timestamp; // UTC seconds; zero until valid. Only the main task consumes this view.
     char text[6];
     clock_feedback_t feedback;
 } clock_view_t;

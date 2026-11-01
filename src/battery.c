@@ -61,7 +61,6 @@ void battery_update(battery_monitor_t *monitor, const ina226_sample_t *sample, i
         reading->valid = false;
         monitor->have_previous = false;
         monitor->candidate = reading->state;
-        monitor->candidate_wh = monitor->candidate_mah = 0;
         return;
     }
 
@@ -81,41 +80,13 @@ void battery_update(battery_monitor_t *monitor, const ina226_sample_t *sample, i
     if (!continuous || raw != monitor->candidate) {
         monitor->candidate = raw;
         monitor->candidate_since_us = now_us;
-        monitor->candidate_wh = monitor->candidate_mah = 0;
     }
 
-    // Integrate only adjacent, valid, same-direction readings above threshold.
-    // Never interpolate across an idle boundary, direction reversal or missing sample.
-    double wh = 0, mah = 0;
-    if (continuous && raw != BATTERY_IDLE && direction(monitor->previous.current_a) == raw) {
-        double hours = elapsed_us / 3600000000.0;
-        double current = fabs((double)sample->current_a);
-        double previous_current = fabs((double)monitor->previous.current_a);
-        mah = (current + previous_current) * 0.5 * 1000 * hours;
-        wh = (sample->voltage_v * current + monitor->previous.voltage_v * previous_current) * 0.5 * hours;
-    }
-    if (raw == reading->state) {
-        reading->session_wh += wh;
-        reading->session_mah += mah;
-    } else {
-        monitor->candidate_wh += wh;
-        monitor->candidate_mah += mah;
-        if (now_us - monitor->candidate_since_us >= BATTERY_CONFIRM_US) {
-            reading->state = raw;
-            if (raw == BATTERY_IDLE) {
-                reading->session_end_us = monitor->candidate_since_us;
-            } else {
-                reading->session_start_us = monitor->candidate_since_us;
-                reading->session_end_us = 0;
-                reading->session_wh = monitor->candidate_wh;
-                reading->session_mah = monitor->candidate_mah;
-            }
-            monitor->candidate_wh = monitor->candidate_mah = 0;
-        }
+    if (raw != reading->state && now_us - monitor->candidate_since_us >= BATTERY_CONFIRM_US) {
+        reading->state = raw;
     }
     reading->valid = true;
     reading->sample = *sample;
-    monitor->previous = *sample;
     monitor->previous_us = now_us;
     monitor->have_previous = true;
 }

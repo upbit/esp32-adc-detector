@@ -1,6 +1,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "ui.h"
 
@@ -15,18 +16,26 @@ LV_FONT_DECLARE(font_ui_soc_64);
 #define BLUE 0x26A8F7
 #define PINK 0xFF738D
 #define GREEN 0x35D85A
-#define TREND_POINTS 48
+#define TREND_BACKGROUND 0x242424
 #define HEADER_RIGHT_MARGIN 44
+#define METRIC_TITLE_Y 156
+#define METRIC_VALUE_Y 182
+#define METRIC_DIVIDER_Y 154
+#define METRIC_DIVIDER_HEIGHT 68
+#define TREND_TITLE_Y (METRIC_DIVIDER_Y + METRIC_DIVIDER_HEIGHT + 32)
+#define TREND_Y (TREND_TITLE_Y + 26)
+#define TREND_BASELINE_Y 396
+#define TREND_HEIGHT (TREND_BASELINE_Y - TREND_Y)
+#define TREND_BOTTOM_Y 416
 
 typedef enum { READING, CHARGING, IDLE, DISCHARGING, UNAVAILABLE } ui_state_t;
 
 static ui_state_t state = READING;
 static lv_obj_t *status_dot, *status_label, *current_label, *current_unit;
-static lv_obj_t *voltage_label, *voltage_unit, *power_label, *battery, *trend;
+static lv_obj_t *voltage_label, *voltage_unit, *battery, *trend;
 static lv_obj_t *time_labels[4];
 static lv_obj_t *soc_label, *soc_unit;
 static battery_reading_t shown_reading;
-static bool show_mah;
 static lv_obj_t *main_screen, *portal_screen, *wifi_icon, *clock_label;
 static lv_obj_t *hotspot_label, *portal_url_label, *countdown_label;
 static lv_obj_t *portal_details, *network_actions, *sync_button;
@@ -35,19 +44,10 @@ static bool sync_enabled;
 static wifi_view_t shown_wifi;
 static int64_t first_wifi_tap;
 static bool have_wifi_tap;
-
-// Trend history remains reference data until the history/time stage.
-static const uint8_t sample_trends[3][TREND_POINTS] = {
-    {60,57,54,51,47,44,41,37,33,29,26,23,21,20,19,20,
-     21,23,25,28,31,34,37,40,43,45,47,49,51,53,54,55,
-     54,53,51,50,52,55,58,60,61,62,64,66,68,70,71,72},
-    {51,49,47,45,43,40,37,35,33,34,36,39,42,46,49,53,
-     57,60,64,67,69,68,66,64,63,65,68,72,75,78,79,77,
-     74,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72},
-    {52,50,48,46,43,41,38,35,34,35,38,42,46,50,54,58,
-     62,66,69,71,70,68,65,64,65,68,72,76,79,82,84,85,
-     83,81,79,77,75,73,71,69,68,66,65,63,62,60,58,56},
-};
+static history_view_t shown_history[2];
+static lv_obj_t *period_label;
+static bool seven_days, have_trend_tap;
+static int64_t first_trend_tap;
 
 static lv_obj_t *label(lv_obj_t *parent, int x, int y, const char *text,
                        const lv_font_t *font, uint32_t color)
@@ -153,6 +153,7 @@ void ui_show_network(const wifi_view_t *wifi, const clock_view_t *clock)
     shown_wifi = *wifi;
     if (screen_changed) {
         have_wifi_tap = false;
+        have_trend_tap = false;
         if (wifi->portal) {
             network_menu = false;
             lv_obj_add_flag(network_actions, LV_OBJ_FLAG_HIDDEN);
@@ -206,6 +207,7 @@ ui_action_t ui_handle_network_tap(int x, int y, int64_t now_us)
     if (have_wifi_tap && now_us >= first_wifi_tap && now_us - first_wifi_tap <= 400000) {
         have_wifi_tap = false;
         network_menu = true;
+        have_trend_tap = false;
         lv_obj_add_flag(portal_details, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(network_actions, LV_OBJ_FLAG_HIDDEN);
         lv_screen_load(portal_screen);
@@ -246,24 +248,88 @@ static void draw_trend(lv_event_t *event)
     lv_obj_get_coords(lv_event_get_target_obj(event), &area);
     lv_layer_t *layer = lv_event_get_layer(event);
     int x = area.x1, y = area.y1;
-    unsigned example = state == CHARGING ? 0 : state == DISCHARGING ? 2 : 1;
-    const uint8_t *values = sample_trends[example];
-    int shade_start = example == 0 ? 150 : 79;
-    int shade_width = example == 0 ? 55 : 70;
-    rect(layer, x + shade_start, y, shade_width, 96, 0x102C19, 0, 0);
-    for (int row = 0; row <= 2; row++) rect(layer, x, y + row * 48, 282, 1, 0x242A27, 0, 0);
-    for (int col = 0; col <= 4; col++) rect(layer, x + col * 70, y, 1, 96, 0x202522, 0, 0);
-    for (int i = 0; i < TREND_POINTS; i++) {
-        int height = values[i] * 94 / 100;
-        uint32_t color = example != 0 ? GREEN : values[i] <= 25 ? PINK : values[i] <= 40 ? 0xE7CE4D : GREEN;
-        rect(layer, x + i * 282 / TREND_POINTS, y + 96 - height, 3, height, color, 0, 0);
+    const history_view_t *view = &shown_history[seven_days];
+    rect(layer, x, y, 282, TREND_HEIGHT + 1, TREND_BACKGROUND, 0, 0);
+    for (unsigned i = 0; i < HISTORY_BARS; i++) {
+        const history_bar_t *bar = &view->bars[i];
+        if (bar->valid && bar->charging_percent >= 50)
+            rect(layer, x + i * 282 / HISTORY_BARS, y, (i + 1) * 282 / HISTORY_BARS - i * 282 / HISTORY_BARS,
+                 TREND_HEIGHT, 0x16371E, 0, 0);
     }
-    // One centered bolt, separated from the interval line by a 4 px clearance.
-    int start = x + shade_start, center = start + shade_width / 2;
-    rect(layer, start, y + 106, center - 11 - start, 2, GREEN, 0, 0);
-    rect(layer, center + 11, y + 106, start + shade_width - center - 11, 2, GREEN, 0, 0);
-    triangle(layer, center + 4, y + 98, center - 7, y + 109, center + 2, y + 109, GREEN);
-    triangle(layer, center - 4, y + 115, center + 7, y + 104, center - 2, y + 104, GREEN);
+    for (int row = 0; row <= 2; row++) rect(layer, x, y + row * TREND_HEIGHT / 2, 282, 1, 0x3B3B3B, 0, 0);
+    for (int col = 0; col <= 4; col++) rect(layer, x + col * 70, y, 1, TREND_HEIGHT, 0x343434, 0, 0);
+    for (unsigned i = 0; i < HISTORY_BARS; i++) {
+        const history_bar_t *bar = &view->bars[i];
+        if (!bar->valid) continue;
+        int height = bar->percent * (TREND_HEIGHT - 2) / 100;
+        if (!height) height = 1; // A measured 0% still differs from no data.
+        uint32_t color = bar->percent <= 25 ? (bar->partial ? 0xB54F63 : PINK) :
+                         bar->percent <= 40 ? (bar->partial ? 0xA59337 : 0xE7CE4D) :
+                         bar->partial ? 0x278742 : GREEN;
+        rect(layer, x + i * 282 / HISTORY_BARS, y + TREND_HEIGHT - height, 3, height, color, 0, 0);
+    }
+    for (unsigned i = 0; i < HISTORY_BARS;) {
+        if (!view->bars[i].valid || view->bars[i].charging_percent < 50) { i++; continue; }
+        unsigned first = i++;
+        while (i < HISTORY_BARS && view->bars[i].valid && view->bars[i].charging_percent >= 50) i++;
+        int start = x + first * 282 / HISTORY_BARS, end = x + i * 282 / HISTORY_BARS;
+        int center = (start + end) / 2;
+        if (end - start < 24) {
+            rect(layer, start, y + TREND_HEIGHT + 10, end - start, 2, GREEN, 0, 0);
+        } else {
+            // One bolt per sufficiently wide contiguous charging group, with 4 px clearance.
+            rect(layer, start, y + TREND_HEIGHT + 10, center - 11 - start, 2, GREEN, 0, 0);
+            rect(layer, center + 11, y + TREND_HEIGHT + 10, end - center - 11, 2, GREEN, 0, 0);
+            triangle(layer, center + 4, y + TREND_HEIGHT + 2, center - 7, y + TREND_HEIGHT + 13,
+                     center + 2, y + TREND_HEIGHT + 13, GREEN);
+            triangle(layer, center - 4, y + TREND_HEIGHT + 19, center + 7, y + TREND_HEIGHT + 8,
+                     center - 2, y + TREND_HEIGHT + 8, GREEN);
+        }
+    }
+}
+
+static void refresh_history(void)
+{
+    const history_view_t *view = &shown_history[seven_days];
+    lv_label_set_text(period_label, seven_days ? "过去7天" : "过去24小时");
+    lv_obj_align(period_label, LV_ALIGN_TOP_RIGHT, -25, TREND_TITLE_Y);
+    for (unsigned i = 0; i < 4; i++) {
+        char text[6] = "";
+        if (view->time_valid) {
+            // Clock-independent formatting: this dashboard is always UTC+8.
+            time_t value = (time_t)(view->start + i * 12 * view->seconds_per_bar + 8 * 3600);
+            struct tm local;
+            gmtime_r(&value, &local);
+            strftime(text, sizeof(text), seven_days ? "%m/%d" : "%H:%M", &local);
+        }
+        lv_label_set_text(time_labels[i], text);
+    }
+    lv_obj_invalidate(trend);
+}
+
+void ui_show_history(const history_view_t *day, const history_view_t *week)
+{
+    bool changed = memcmp(&shown_history[seven_days], seven_days ? week : day, sizeof(*day)) != 0;
+    shown_history[0] = *day;
+    shown_history[1] = *week;
+    if (changed) refresh_history();
+}
+
+bool ui_handle_history_tap(int x, int y, int64_t now_us)
+{
+    if (network_menu || shown_wifi.portal || x < 26 || x >= 309 || y < TREND_Y || y >= TREND_BOTTOM_Y) {
+        have_trend_tap = false;
+        return false;
+    }
+    if (have_trend_tap && now_us >= first_trend_tap && now_us - first_trend_tap <= 400000) {
+        have_trend_tap = false;
+        seven_days = !seven_days;
+        refresh_history();
+        return true;
+    }
+    first_trend_tap = now_us;
+    have_trend_tap = true;
+    return false;
 }
 
 static void align_units(void)
@@ -310,33 +376,12 @@ void ui_show_battery(const battery_reading_t *reading)
         snprintf(text, sizeof(text), "%d", reading->percent);
         lv_label_set_text(soc_label, text);
     }
-    if (next == IDLE || next == UNAVAILABLE) {
-        lv_obj_add_flag(power_label, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        char text[48];
-        snprintf(text, sizeof(text), "%s %.2f %s", next == CHARGING ? "本次充入" : "本次输出",
-                 show_mah ? reading->session_mah : reading->session_wh, show_mah ? "mAh" : "Wh");
-        lv_label_set_text(power_label, text);
-        lv_obj_remove_flag(power_label, LV_OBJ_FLAG_HIDDEN);
-    }
     align_units();
     if (soc_changed) lv_obj_invalidate(battery);
     if (next != state) {
         state = next;
-        const char *times[] = {"00:00", "06:00", "12:00", "18:00"};
-        for (int i = 0; i < 4; i++) lv_label_set_text(time_labels[i], times[(i + (next == CHARGING ? 3 : 0)) % 4]);
         lv_obj_invalidate(battery);
-        lv_obj_invalidate(trend);
     }
-}
-
-void ui_handle_tap(int x, int y)
-{
-    if (shown_wifi.portal || network_menu) return;
-    if (lv_obj_has_flag(power_label, LV_OBJ_FLAG_HIDDEN)) return;
-    if (x < 26 || x >= 343 || y < 235 || y >= 270) return;
-    show_mah = !show_mah;
-    ui_show_battery(&shown_reading);
 }
 
 void ui_init(lv_display_t *display)
@@ -349,11 +394,12 @@ void ui_init(lv_display_t *display)
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
     state = READING;
     shown_reading = (battery_reading_t){0};
-    show_mah = false;
     shown_wifi = (wifi_view_t){0};
     have_wifi_tap = false;
     network_menu = false;
     sync_enabled = false;
+    memset(shown_history, 0, sizeof(shown_history));
+    seven_days = have_trend_tap = false;
 
     // Keep corner-adjacent content inside the panel's larger physical cutouts.
     status_dot = surface(screen, 44, 32, 15, 15);
@@ -372,28 +418,25 @@ void ui_init(lv_display_t *display)
     battery = surface(screen, 195, 76, 166, 58);
     lv_obj_add_event_cb(battery, draw_battery, LV_EVENT_DRAW_MAIN, NULL);
 
-    label(screen, 26, 172, "电池电流", &font_ui_text_16, MUTED);
-    label(screen, 230, 172, "电池电压", &font_ui_text_16, MUTED);
-    current_label = label(screen, 26, 198, "--", &font_ui_numbers_36, WHITE);
+    label(screen, 26, METRIC_TITLE_Y, "电池电流", &font_ui_text_16, MUTED);
+    label(screen, 230, METRIC_TITLE_Y, "电池电压", &font_ui_text_16, MUTED);
+    current_label = label(screen, 26, METRIC_VALUE_Y, "--", &font_ui_numbers_36, WHITE);
     current_unit = label(screen, 0, 0, "mA", &lv_font_montserrat_14, WHITE);
-    voltage_label = label(screen, 230, 198, "--", &font_ui_numbers_36, WHITE);
+    voltage_label = label(screen, 230, METRIC_VALUE_Y, "--", &font_ui_numbers_36, WHITE);
     voltage_unit = label(screen, 0, 0, "V", &lv_font_montserrat_14, WHITE);
-    power_label = label(screen, 26, 243, "", &font_ui_text_16, MUTED);
-    lv_obj_add_flag(power_label, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_t *divider = surface(screen, 198, 170, 1, 68);
+    lv_obj_t *divider = surface(screen, 198, METRIC_DIVIDER_Y, 1, METRIC_DIVIDER_HEIGHT);
     lv_obj_set_style_bg_color(divider, lv_color_hex(0x242424), 0);
     lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, 0);
 
-    label(screen, 26, 274, "电量趋势", &font_ui_text_16, WHITE);
-    lv_obj_t *period = label(screen, 0, 274, "过去24小时", &font_ui_text_16, MUTED);
-    lv_obj_align(period, LV_ALIGN_TOP_RIGHT, -25, 274);
-    trend = surface(screen, 26, 300, 283, 116);
+    label(screen, 26, TREND_TITLE_Y, "电量趋势", &font_ui_text_16, WHITE);
+    period_label = label(screen, 0, TREND_TITLE_Y, "过去24小时", &font_ui_text_16, MUTED);
+    lv_obj_align(period_label, LV_ALIGN_TOP_RIGHT, -25, TREND_TITLE_Y);
+    trend = surface(screen, 26, TREND_Y, 283, TREND_BOTTOM_Y - TREND_Y);
     lv_obj_add_event_cb(trend, draw_trend, LV_EVENT_DRAW_MAIN, NULL);
-    label(screen, 316, 296, "100%", &lv_font_montserrat_14, MUTED);
-    label(screen, 316, 344, "50%", &lv_font_montserrat_14, MUTED);
-    label(screen, 316, 392, "0%", &lv_font_montserrat_14, MUTED);
-    const char *times[] = {"00:00", "06:00", "12:00", "18:00"};
-    for (int i = 0; i < 4; i++) time_labels[i] = label(screen, 50 + i * 67, 419, times[i], &lv_font_montserrat_14, MUTED);
+    label(screen, 316, TREND_Y - 4, "100%", &lv_font_montserrat_14, MUTED);
+    label(screen, 316, TREND_Y + TREND_HEIGHT / 2 - 4, "50%", &lv_font_montserrat_14, MUTED);
+    label(screen, 316, TREND_BASELINE_Y - 4, "0%", &lv_font_montserrat_14, MUTED);
+    for (int i = 0; i < 4; i++) time_labels[i] = label(screen, 50 + i * 67, 419, "", &lv_font_montserrat_14, MUTED);
     align_units();
 
     portal_screen = lv_obj_create(NULL);

@@ -81,6 +81,7 @@ void clock_get_view(int64_t now_us, clock_view_t *view)
         .feedback = now_us < feedback_until ? feedback : CLOCK_NORMAL};
     if (valid) {
         time_t now = time(NULL);
+        view->timestamp = now;
         struct tm local;
         localtime_r(&now, &local);
         strftime(view->text, sizeof(view->text), "%H:%M", &local);
