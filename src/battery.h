@@ -13,6 +13,8 @@
 #ifndef BATTERY_FULL_VOLTAGE_V
 #define BATTERY_FULL_VOLTAGE_V 4.20f
 #endif
+// Rest voltage where the CN3791 MPPT ends charging; shown as 99%, never 100%.
+#define BATTERY_SYSTEM_FULL_VOLTAGE_V 4.10f
 #define BATTERY_CURRENT_THRESHOLD_A 0.010f
 #define BATTERY_CONFIRM_US INT64_C(60000000)
 
@@ -46,7 +48,8 @@ typedef struct {
 } battery_monitor_t;
 
 void battery_init(battery_monitor_t *monitor);
-// Pure voltage estimate, no capacity or automatic full-charge learning.
+// Pure cell voltage estimate, no capacity or automatic full-charge learning.
+// reading.percent rescales it so BATTERY_SYSTEM_FULL_VOLTAGE_V is the system's full.
 float battery_voltage_percent(float voltage_v);
 // One monotonic timestamp per sample; NULL breaks continuity without clearing totals.
 void battery_update(battery_monitor_t *monitor, const ina226_sample_t *sample, int64_t now_us);

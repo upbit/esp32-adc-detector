@@ -20,6 +20,36 @@ static void run(battery_monitor_t *monitor, int start, int end, float current)
     for (int i = start; i <= end; i++) sample(monitor, i, 4.0f, current);
 }
 
+static int shown_percent(float voltage)
+{
+    battery_monitor_t monitor;
+    battery_init(&monitor);
+    sample(&monitor, 0, voltage, 0); // First sample is unsmoothed.
+    return monitor.reading.percent;
+}
+
+static void test_system_percent(void)
+{
+    // 4.10 V rest voltage after CN3791 termination is ~92% of the cell curve.
+    assert(fabsf(battery_voltage_percent(BATTERY_SYSTEM_FULL_VOLTAGE_V) - 92.142857f) < 0.0001f);
+    assert(shown_percent(0) == 0);
+    assert(shown_percent(BATTERY_EMPTY_VOLTAGE_V) == 0);
+    assert(shown_percent(3.30f) == 17);
+    assert(shown_percent(3.72f) == 54);
+    assert(shown_percent(4.01f) == 90);
+    assert(shown_percent(4.05f) == 95);
+    assert(shown_percent(4.08f) == 98);
+    for (int mv = 4090; mv <= 4110; mv++) assert(shown_percent(mv / 1000.0f) == 99);
+    assert(shown_percent(BATTERY_FULL_VOLTAGE_V) == 99); // Never 100%.
+    assert(shown_percent(5) == 99);
+    int previous = 0;
+    for (int mv = 0; mv <= 5000; mv++) {
+        int percent = shown_percent(mv / 1000.0f);
+        assert(percent >= previous && percent <= 99);
+        previous = percent;
+    }
+}
+
 static void test_curve(void)
 {
     near(battery_voltage_percent(0), 0);
@@ -54,18 +84,13 @@ static void test_curve(void)
     battery_init(&monitor);
     assert(!monitor.reading.valid);
     sample(&monitor, 0, 3.72f, 0);
-    assert(monitor.reading.percent == 50);
+    assert(monitor.reading.percent == 54);
     sample(&monitor, 1, 4.0f, 0);
-    assert(monitor.reading.percent == 51); // One-second smoothing, not a jump to 81%.
+    assert(monitor.reading.percent == 55); // One-second smoothing, not a jump to 88%.
     battery_update(&monitor, NULL, 2000000);
     assert(!monitor.reading.valid);
     sample(&monitor, 3, 0, 0);
     assert(monitor.reading.valid && monitor.reading.percent == 0);
-    battery_init(&monitor);
-    sample(&monitor, 0, BATTERY_FULL_VOLTAGE_V - 0.0001f, 0);
-    assert(monitor.reading.percent == 99);
-    sample(&monitor, 1, BATTERY_FULL_VOLTAGE_V, 0);
-    assert(monitor.reading.percent == 100);
 }
 
 static void test_thresholds_and_confirmation(void)
@@ -181,9 +206,10 @@ static void test_missing_samples(void)
 int main(void)
 {
     test_curve();
+    test_system_percent();
     test_thresholds_and_confirmation();
     test_integration_and_sessions();
     test_missing_samples();
-    puts("PASS: voltage curve, smoothing, 10 mA boundaries, 60 s confirmation, Wh/mAh, reversals and missing samples");
+    puts("PASS: voltage curve, 4.10 V system 99% cap, smoothing, 10 mA boundaries, 60 s confirmation, Wh/mAh, reversals and missing samples");
     return 0;
 }

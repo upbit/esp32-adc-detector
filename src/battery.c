@@ -9,6 +9,8 @@
 
 _Static_assert(BATTERY_EMPTY_VOLTAGE_V < 3.20f, "Empty-voltage anchor must be below the 10% knot");
 _Static_assert(BATTERY_FULL_VOLTAGE_V > 4.14f, "Full-voltage anchor must exceed the 95% knot");
+_Static_assert(BATTERY_SYSTEM_FULL_VOLTAGE_V > 3.20f && BATTERY_SYSTEM_FULL_VOLTAGE_V <= BATTERY_FULL_VOLTAGE_V,
+               "System-full anchor must lie inside the cell curve");
 
 static battery_state_t direction(float current_a)
 {
@@ -38,6 +40,15 @@ float battery_voltage_percent(float voltage_v)
     return 100;
 }
 
+// The MPPT stops charging below cell-full, so rescale to its rest voltage.
+// Capped at 99%: system-full is not cell-full. The empty anchor is already 0%.
+static float system_percent(float voltage_v)
+{
+    float percent = battery_voltage_percent(voltage_v) * 100 /
+                    battery_voltage_percent(BATTERY_SYSTEM_FULL_VOLTAGE_V);
+    return percent > 99 ? 99 : percent;
+}
+
 void battery_init(battery_monitor_t *monitor)
 {
     *monitor = (battery_monitor_t){0};
@@ -57,7 +68,7 @@ void battery_update(battery_monitor_t *monitor, const ina226_sample_t *sample, i
     int64_t elapsed_us = now_us - monitor->previous_us;
     bool continuous = monitor->have_previous && elapsed_us > 0 && elapsed_us <= MAX_SAMPLE_GAP_US;
     battery_state_t raw = direction(sample->current_a);
-    float target_percent = battery_voltage_percent(sample->voltage_v);
+    float target_percent = system_percent(sample->voltage_v);
     if (!continuous) {
         monitor->filtered_percent = target_percent;
     } else {
@@ -66,8 +77,6 @@ void battery_update(battery_monitor_t *monitor, const ina226_sample_t *sample, i
                                     (1 - exp(-seconds / SOC_FILTER_SECONDS));
     }
     reading->percent = (int)lroundf(monitor->filtered_percent);
-    // Rounding must not claim 100% before the voltage curve actually reaches its anchor.
-    if (reading->percent == 100 && target_percent < 100) reading->percent = 99;
 
     if (!continuous || raw != monitor->candidate) {
         monitor->candidate = raw;
