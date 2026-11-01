@@ -5,6 +5,7 @@
 .vscode/ipch
 .DS_Store
 managed_components
+logs/
 
 docs/AMOLED/*.pdf
 docs/AMOLED/TK0196M106/

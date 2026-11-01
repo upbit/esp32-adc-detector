@@ -19,7 +19,8 @@ def main():
     bold = LVGL / "tests/src/test_files/fonts/Montserrat-Bold.ttf"
     chinese = LVGL / "scripts/built_in_font/SourceHanSansSC-Normal.otf"
     fonts = [
-        ("text_16", chinese, 16, "充电中待机放池流压量趋势过去小时功率入输出读取失败以来本次累计"),
+        ("text_16", chinese, 16, "充电中待机放池流压量趋势过去小时功率入输出读取失败以来本次累计配网热点名称密码页面秒后关闭"),
+        ("actions_24", chinese, 24, "时间同步重新开启热点"),
         ("numbers_36", bold, 36, "+-.0123456789"),
         ("soc_88", bold, 88, "-0123456789"),
         ("soc_64", bold, 64, "0123456789"),

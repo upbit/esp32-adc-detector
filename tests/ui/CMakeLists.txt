@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.16)
+project(network_ui_test C)
+get_filename_component(REPO "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+set(LV_BUILD_CONF_PATH "${CMAKE_CURRENT_SOURCE_DIR}/lv_conf.h" CACHE PATH "" FORCE)
+set(CONFIG_LV_BUILD_DEMOS OFF CACHE BOOL "" FORCE)
+set(CONFIG_LV_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(CONFIG_LV_USE_THORVG_INTERNAL OFF CACHE BOOL "" FORCE)
+add_subdirectory("${REPO}/managed_components/lvgl__lvgl" lvgl)
+add_executable(network_ui_test network_ui_test.c
+    "${REPO}/src/fonts/font_ui_text_16.c" "${REPO}/src/fonts/font_ui_numbers_36.c"
+    "${REPO}/src/fonts/font_ui_soc_88.c" "${REPO}/src/fonts/font_ui_soc_64.c")
+target_sources(network_ui_test PRIVATE "${REPO}/src/fonts/font_ui_actions_24.c")
+target_include_directories(network_ui_test PRIVATE "${REPO}/src" "${REPO}/tests/host")
+target_compile_definitions(network_ui_test PRIVATE UI_SOURCE="${REPO}/src/ui.c")
+target_compile_options(network_ui_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(network_ui_test PRIVATE lvgl m)

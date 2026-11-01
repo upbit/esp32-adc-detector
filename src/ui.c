@@ -1,9 +1,11 @@
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "ui.h"
 
 LV_FONT_DECLARE(font_ui_text_16);
+LV_FONT_DECLARE(font_ui_actions_24);
 LV_FONT_DECLARE(font_ui_numbers_36);
 LV_FONT_DECLARE(font_ui_soc_88);
 LV_FONT_DECLARE(font_ui_soc_64);
@@ -14,6 +16,7 @@ LV_FONT_DECLARE(font_ui_soc_64);
 #define PINK 0xFF738D
 #define GREEN 0x35D85A
 #define TREND_POINTS 48
+#define HEADER_RIGHT_MARGIN 44
 
 typedef enum { READING, CHARGING, IDLE, DISCHARGING, UNAVAILABLE } ui_state_t;
 
@@ -24,6 +27,14 @@ static lv_obj_t *time_labels[4];
 static lv_obj_t *soc_label, *soc_unit;
 static battery_reading_t shown_reading;
 static bool show_mah;
+static lv_obj_t *main_screen, *portal_screen, *wifi_icon, *clock_label;
+static lv_obj_t *hotspot_label, *portal_url_label, *countdown_label;
+static lv_obj_t *portal_details, *network_actions, *sync_button;
+static bool network_menu;
+static bool sync_enabled;
+static wifi_view_t shown_wifi;
+static int64_t first_wifi_tap;
+static bool have_wifi_tap;
 
 // Trend history remains reference data until the history/time stage.
 static const uint8_t sample_trends[3][TREND_POINTS] = {
@@ -60,6 +71,20 @@ static lv_obj_t *surface(lv_obj_t *parent, int x, int y, int width, int height)
     return obj;
 }
 
+static lv_obj_t *network_button(lv_obj_t *parent, int y, const char *text,
+                                const char *symbol, bool primary)
+{
+    lv_obj_t *button = surface(parent, 0, y, 280, primary ? 64 : 56);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(primary ? BLUE : 0x171B19), 0);
+    lv_obj_set_style_radius(button, 6, 0);
+    lv_obj_t *caption = label(button, 0, 0, text, &font_ui_actions_24, WHITE);
+    lv_obj_align(caption, LV_ALIGN_CENTER, 18, 0);
+    lv_obj_t *icon = label(button, 0, 0, symbol, &lv_font_montserrat_28, WHITE);
+    lv_obj_align_to(icon, caption, LV_ALIGN_OUT_LEFT_MID, -12, 0);
+    return button;
+}
+
 static void rect(lv_layer_t *layer, int x, int y, int width, int height,
                  uint32_t color, int radius, int border)
 {
@@ -83,6 +108,112 @@ static void triangle(lv_layer_t *layer, int x1, int y1, int x2, int y2,
     dsc.p[1] = (lv_point_precise_t){x2, y2};
     dsc.p[2] = (lv_point_precise_t){x3, y3};
     lv_draw_triangle(layer, &dsc);
+}
+
+static void draw_wifi(lv_event_t *event)
+{
+    lv_area_t area;
+    lv_obj_get_coords(lv_event_get_target_obj(event), &area);
+    lv_layer_t *layer = lv_event_get_layer(event);
+    lv_draw_arc_dsc_t arc;
+    lv_draw_arc_dsc_init(&arc);
+    arc.center = (lv_point_t){area.x1 + 13, area.y1 + 21};
+    arc.start_angle = 225;
+    arc.end_angle = 315;
+    arc.width = 2;
+    arc.rounded = true;
+    arc.color = lv_color_hex(shown_wifi.connected ? WHITE : MUTED);
+    for (int radius = 8; radius <= 17; radius += 5) {
+        arc.radius = radius;
+        lv_draw_arc(layer, &arc);
+    }
+    rect(layer, area.x1 + 12, area.y1 + 20, 3, 3, shown_wifi.connected ? WHITE : MUTED, 2, 0);
+    if (!shown_wifi.connected) {
+        lv_draw_line_dsc_t line;
+        lv_draw_line_dsc_init(&line);
+        line.p1 = (lv_point_precise_t){area.x1 + 2, area.y1 + 2};
+        line.p2 = (lv_point_precise_t){area.x1 + 24, area.y1 + 24};
+        line.color = lv_color_black();
+        line.width = 5;
+        lv_draw_line(layer, &line);
+        line.color = lv_color_hex(MUTED);
+        line.width = 2;
+        lv_draw_line(layer, &line);
+    }
+}
+
+void ui_show_network(const wifi_view_t *wifi, const clock_view_t *clock)
+{
+    bool screen_changed = wifi->portal != shown_wifi.portal;
+    bool icon_changed = wifi->connected != shown_wifi.connected;
+    bool countdown_changed = wifi->seconds_remaining != shown_wifi.seconds_remaining;
+    if (wifi->portal && (screen_changed || strcmp(wifi->hotspot, shown_wifi.hotspot))) {
+        lv_label_set_text(hotspot_label, wifi->hotspot);
+    }
+    shown_wifi = *wifi;
+    if (screen_changed) {
+        have_wifi_tap = false;
+        if (wifi->portal) {
+            network_menu = false;
+            lv_obj_add_flag(network_actions, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(portal_details, LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_screen_load(wifi->portal ? portal_screen : main_screen);
+    }
+    if (wifi->portal && (screen_changed || countdown_changed))
+        lv_label_set_text_fmt(countdown_label, "%d 秒后关闭热点", wifi->seconds_remaining);
+    if (icon_changed) lv_obj_invalidate(wifi_icon);
+    if (clock->valid && !wifi->active) lv_obj_add_flag(wifi_icon, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_remove_flag(wifi_icon, LV_OBJ_FLAG_HIDDEN);
+    bool enabled = wifi->configured && !wifi->active;
+    if (enabled != sync_enabled) {
+        sync_enabled = enabled;
+        lv_obj_set_style_opa(sync_button, enabled ? LV_OPA_COVER : LV_OPA_40, 0);
+    }
+    const char *text = clock->feedback == CLOCK_FAILED ? "失败" : clock->valid ? clock->text : "";
+    if (strcmp(lv_label_get_text(clock_label), text)) {
+        lv_label_set_text(clock_label, text);
+        lv_obj_update_layout(clock_label);
+        lv_obj_align(clock_label, LV_ALIGN_TOP_RIGHT, -HEADER_RIGHT_MARGIN, 31);
+        lv_obj_set_x(wifi_icon, text[0] ? lv_obj_get_x(clock_label) - 8 - 26 :
+                     368 - HEADER_RIGHT_MARGIN - 26);
+    }
+    lv_obj_set_style_text_color(clock_label, lv_color_hex(clock->feedback == CLOCK_SYNCED ? GREEN :
+                               clock->feedback == CLOCK_FAILED ? PINK : WHITE), 0);
+}
+
+ui_action_t ui_handle_network_tap(int x, int y, int64_t now_us)
+{
+    if (network_menu) {
+        bool close = x >= 284 && x < 334 && y >= 22 && y < 70;
+        bool sync = x >= 44 && x < 324 && y >= 192 && y < 256 &&
+                    shown_wifi.configured && !shown_wifi.active;
+        bool hotspot = x >= 44 && x < 324 && y >= 276 && y < 332;
+        if (close || sync || hotspot) {
+            network_menu = false;
+            lv_screen_load(main_screen);
+        }
+        return sync ? UI_ACTION_SYNC_TIME : hotspot ? UI_ACTION_OPEN_WIFI : UI_ACTION_NONE;
+    }
+    if (shown_wifi.portal) {
+        if (x >= 284 && x < 334 && y >= 22 && y < 70) return UI_ACTION_CANCEL_WIFI;
+        return UI_ACTION_NONE;
+    }
+    if (x < 214 || x >= 328 || y < 18 || y >= 65) {
+        have_wifi_tap = false;
+        return UI_ACTION_NONE;
+    }
+    if (have_wifi_tap && now_us >= first_wifi_tap && now_us - first_wifi_tap <= 400000) {
+        have_wifi_tap = false;
+        network_menu = true;
+        lv_obj_add_flag(portal_details, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(network_actions, LV_OBJ_FLAG_HIDDEN);
+        lv_screen_load(portal_screen);
+        return UI_ACTION_NONE;
+    }
+    have_wifi_tap = true;
+    first_wifi_tap = now_us;
+    return UI_ACTION_NONE;
 }
 
 static void draw_battery(lv_event_t *event)
@@ -201,6 +332,7 @@ void ui_show_battery(const battery_reading_t *reading)
 
 void ui_handle_tap(int x, int y)
 {
+    if (shown_wifi.portal || network_menu) return;
     if (lv_obj_has_flag(power_label, LV_OBJ_FLAG_HIDDEN)) return;
     if (x < 26 || x >= 343 || y < 235 || y >= 270) return;
     show_mah = !show_mah;
@@ -210,6 +342,7 @@ void ui_handle_tap(int x, int y)
 void ui_init(lv_display_t *display)
 {
     lv_obj_t *screen = lv_display_get_screen_active(display);
+    main_screen = screen;
     lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
     lv_obj_set_style_text_font(screen, &lv_font_montserrat_14, 0);
     lv_obj_set_style_pad_all(screen, 0, 0);
@@ -217,6 +350,10 @@ void ui_init(lv_display_t *display)
     state = READING;
     shown_reading = (battery_reading_t){0};
     show_mah = false;
+    shown_wifi = (wifi_view_t){0};
+    have_wifi_tap = false;
+    network_menu = false;
+    sync_enabled = false;
 
     // Keep corner-adjacent content inside the panel's larger physical cutouts.
     status_dot = surface(screen, 44, 32, 15, 15);
@@ -224,6 +361,10 @@ void ui_init(lv_display_t *display)
     lv_obj_set_style_bg_color(status_dot, lv_color_hex(MUTED), 0);
     lv_obj_set_style_radius(status_dot, LV_RADIUS_CIRCLE, 0);
     status_label = label(screen, 67, 31, "读取中", &font_ui_text_16, WHITE);
+    wifi_icon = surface(screen, 368 - HEADER_RIGHT_MARGIN - 26, 26, 26, 26);
+    lv_obj_add_event_cb(wifi_icon, draw_wifi, LV_EVENT_DRAW_MAIN, NULL);
+    clock_label = label(screen, 0, 31, "", &font_ui_text_16, WHITE);
+    lv_obj_align(clock_label, LV_ALIGN_TOP_RIGHT, -HEADER_RIGHT_MARGIN, 31);
 
     soc_label = label(screen, 24, 68, "--", &font_ui_soc_88, WHITE);
     lv_obj_set_width(soc_label, 126);
@@ -254,4 +395,27 @@ void ui_init(lv_display_t *display)
     const char *times[] = {"00:00", "06:00", "12:00", "18:00"};
     for (int i = 0; i < 4; i++) time_labels[i] = label(screen, 50 + i * 67, 419, times[i], &lv_font_montserrat_14, MUTED);
     align_units();
+
+    portal_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(portal_screen, lv_color_black(), 0);
+    lv_obj_set_style_pad_all(portal_screen, 0, 0);
+    lv_obj_remove_flag(portal_screen, LV_OBJ_FLAG_SCROLLABLE);
+    label(portal_screen, 44, 35, "Wi-Fi 配网", &font_ui_text_16, WHITE);
+    label(portal_screen, 299, 31, LV_SYMBOL_CLOSE, &lv_font_montserrat_28, MUTED);
+    lv_obj_t *rule = surface(portal_screen, 36, 76, 296, 1);
+    lv_obj_set_style_bg_color(rule, lv_color_hex(0x242424), 0);
+    lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0);
+    portal_details = surface(portal_screen, 0, 88, 368, 320);
+    label(portal_details, 44, 28, "热点名称", &font_ui_text_16, MUTED);
+    hotspot_label = label(portal_details, 44, 61, "", &lv_font_montserrat_36, WHITE);
+    lv_label_set_long_mode(hotspot_label, LV_LABEL_LONG_CLIP);
+    label(portal_details, 44, 158, "配网页面", &font_ui_text_16, MUTED);
+    portal_url_label = label(portal_details, 44, 191, "http://192.168.4.1", &lv_font_montserrat_32, WHITE);
+    lv_label_set_long_mode(portal_url_label, LV_LABEL_LONG_CLIP);
+    countdown_label = label(portal_details, 44, 266, "", &font_ui_text_16, MUTED);
+    network_actions = surface(portal_screen, 44, 192, 280, 152);
+    sync_button = network_button(network_actions, 0, "时间同步", LV_SYMBOL_REFRESH, true);
+    lv_obj_set_style_opa(sync_button, LV_OPA_40, 0);
+    network_button(network_actions, 84, "重新开启热点", LV_SYMBOL_WIFI, false);
+    lv_obj_add_flag(network_actions, LV_OBJ_FLAG_HIDDEN);
 }

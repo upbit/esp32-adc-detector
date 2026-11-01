@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Solar Monitor · Wi-Fi 配网</title>
+  <style>
+    :root { color-scheme: light; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #202827; background: #f3f5f4; }
+    * { box-sizing: border-box; letter-spacing: 0; }
+    body { margin: 0; }
+    header { background: #fff; border-bottom: 1px solid #dce2df; }
+    .header-inner { max-width: 780px; margin: auto; padding: 21px 24px; display: flex; align-items: center; gap: 12px; }
+    .brand-icon { width: 36px; height: 36px; color: #168653; }
+    .brand { font-size: 19px; font-weight: 650; }
+    .header-meta { margin-left: auto; color: #65716b; font-size: 12px; }
+    main { max-width: 780px; padding: 28px 24px 40px; margin: auto; }
+    h1 { font-size: 24px; line-height: 1.3; margin: 0 0 22px; }
+    h2 { font-size: 16px; margin: 0; }
+    .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 25px 0 12px; }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: default; opacity: .55; }
+    button:focus-visible, input:focus-visible, .network:focus-visible { outline: 3px solid #70bdeb; outline-offset: 3px; }
+    .icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+    .icon-button { display: inline-flex; justify-content: center; align-items: center; width: 40px; height: 40px; border: 1px solid #cdd6d1; border-radius: 6px; background: #fff; color: #4b5951; }
+    .status { display: flex; align-items: center; gap: 12px; min-height: 70px; padding: 14px 16px; border-left: 3px solid #168653; background: #e8f3ed; }
+    .status[data-tone="error"] { background: #fff0f0; border-color: #c84650; color: #942934; }
+    .status[data-tone="busy"] { background: #edf4fb; border-color: #3185bb; }
+    .status strong { font-weight: 600; }
+    .status p { margin: 2px 0 0; font-size: 13px; color: #5c6b62; }
+    .networks { background: #fff; border-top: 1px solid #d6ded9; border-bottom: 1px solid #d6ded9; max-height: 324px; overflow-y: auto; }
+    .network { width: 100%; min-height: 60px; display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: transparent; border: 0; border-bottom: 1px solid #e7ebe8; text-align: left; color: inherit; }
+    .network:last-child { border-bottom: 0; }
+    .network:hover { background: #f5f9f6; }
+    .network[aria-pressed="true"] { background: #eaf5ee; box-shadow: inset 3px 0 #168653; }
+    .network-name { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+    .signal { font-size: 12px; color: #6a766f; white-space: nowrap; }
+    .empty { padding: 24px 16px; text-align: center; color: #758078; font-size: 14px; }
+    form { padding-top: 8px; }
+    label { display: block; font-size: 13px; font-weight: 600; margin: 18px 0 7px; }
+    input { width: 100%; min-width: 0; height: 46px; background: #fff; border: 1px solid #cbd5ce; border-radius: 6px; padding: 10px 12px; color: #202827; }
+    input:disabled { background: #edf0ee; }
+    .password-field { display: flex; position: relative; }
+    .password-field input { padding-right: 52px; }
+    .password-field button { position: absolute; right: 3px; top: 3px; border: 0; background: transparent; }
+    .error { margin: 10px 0 0; min-height: 20px; font-size: 13px; color: #b32e3a; }
+    .submit { display: flex; align-items: center; justify-content: center; gap: 9px; width: 100%; min-height: 48px; margin-top: 14px; padding: 11px 18px; color: white; background: #168653; border: 0; border-radius: 6px; font-weight: 600; }
+    .submit:hover:not(:disabled) { background: #10683f; }
+    footer { margin-top: 24px; padding-top: 15px; border-top: 1px solid #dce2df; display: flex; justify-content: space-between; gap: 12px; color: #78837c; font-size: 12px; }
+    .spin { animation: spin 1.1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (max-width: 480px) { .header-inner { padding: 17px 18px; } main { padding: 24px 18px 30px; } .header-meta { display: none; } h1 { font-size: 22px; } }
+    @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+  </style>
+</head>
+<body>
+  <!-- Lucide icon paths, ISC license; see docs/lucide-license.txt. -->
+  <svg style="display:none" aria-hidden="true"><defs>
+    <symbol id="wifi" viewBox="0 0 24 24"><path d="M2 8.82a15 15 0 0 1 20 0M5 12a10 10 0 0 1 14 0M8.5 15.5a5 5 0 0 1 7 0"/><path d="M12 19h.01"/></symbol>
+    <symbol id="refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15.36-6.36L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.36 6.36L3 16M3 21v-5h5"/></symbol>
+    <symbol id="lock" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+    <symbol id="eye" viewBox="0 0 24 24"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="check" viewBox="0 0 24 24"><path d="m9 12 2 2 4-4"/><circle cx="12" cy="12" r="10"/></symbol>
+    <symbol id="alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></symbol>
+    <symbol id="sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"/></symbol>
+  </defs></svg>
+  <header><div class="header-inner"><svg class="icon brand-icon"><use href="#sun"/></svg><span class="brand">Solar Monitor</span><span class="header-meta">192.168.4.1</span></div></header>
+  <main>
+    <h1>Wi-Fi 配网</h1>
+    <div class="status" id="status" role="status" aria-live="polite">
+      <svg class="icon" id="status-icon"><use href="#wifi"/></svg>
+      <div><strong id="status-title">选择 Wi-Fi 网络</strong><p id="status-detail">设备热点已开启</p></div>
+    </div>
+    <div class="section-head"><h2>附近网络</h2><button class="icon-button" id="refresh-button" title="重新扫描" aria-label="重新扫描"><svg class="icon"><use href="#refresh"/></svg></button></div>
+    <div class="networks" id="networks" aria-label="附近 Wi-Fi 网络"><div class="empty">正在扫描…</div></div>
+    <form id="form">
+      <label for="ssid">Wi-Fi 名称</label><input id="ssid" name="ssid" autocomplete="off" placeholder="选择网络或手工输入名称" required>
+      <label for="password">密码</label><div class="password-field"><input id="password" name="password" type="password" autocomplete="new-password" placeholder="开放网络可留空"><button type="button" class="icon-button" id="toggle-password" title="显示密码" aria-label="显示密码" aria-pressed="false"><svg class="icon"><use href="#eye"/></svg></button></div>
+      <p class="error" id="error" role="alert"></p>
+      <button class="submit" id="submit" type="submit"><svg class="icon"><use href="#wifi"/></svg><span id="submit-text">连接网络</span></button>
+    </form>
+    <footer><span>Solar Monitor</span><span id="footer-state">本地配网</span></footer>
+  </main>
+  <script>
+    'use strict';
+    const $ = id => document.getElementById(id);
+    let busy = false, success = false, submitting = false, scanning = false, selected = '', entries = [], failures = 0;
+    const encoder = new TextEncoder();
+    function icon(name) {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('class', 'icon'); svg.setAttribute('aria-hidden', 'true');
+      const use = document.createElementNS(svg.namespaceURI, 'use'); use.setAttribute('href', '#' + name); svg.append(use); return svg;
+    }
+    function message(title, detail, tone = '', name = 'wifi') {
+      $('status-title').textContent = title; $('status-detail').textContent = detail;
+      $('status').dataset.tone = tone; $('status-icon').replaceChildren(icon(name).firstChild);
+      $('status-icon').classList.toggle('spin', tone === 'busy');
+    }
+    function controls() {
+      for (const id of ['ssid', 'password', 'submit', 'toggle-password']) $(id).disabled = busy || success;
+      $('refresh-button').disabled = busy || success || scanning;
+      $('refresh-button').firstElementChild.classList.toggle('spin', scanning);
+      $('submit-text').textContent = busy ? '配网中…' : success ? '已连接' : '连接网络';
+      for (const row of $('networks').querySelectorAll('button')) row.disabled = busy || success;
+    }
+    function renderNetworks() {
+      $('networks').replaceChildren();
+      if (!entries.length) {
+        const empty = document.createElement('div'); empty.className = 'empty';
+        empty.textContent = scanning ? '正在扫描…' : '未发现网络，可刷新或手工输入名称'; $('networks').append(empty);
+      }
+      for (const entry of entries) {
+        const row = document.createElement('button'); row.type = 'button'; row.className = 'network';
+        row.setAttribute('aria-pressed', String(entry.ssid === selected)); row.append(icon('wifi'));
+        const name = document.createElement('span'); name.className = 'network-name'; name.textContent = entry.ssid; row.append(name);
+        const signal = document.createElement('span'); signal.className = 'signal';
+        signal.textContent = entry.rssi >= -55 ? '强' : entry.rssi >= -72 ? '中' : '弱'; row.append(signal);
+        if (entry.secure) row.append(icon('lock'));
+        row.addEventListener('click', () => {
+          selected = entry.ssid; $('ssid').value = selected; $('error').textContent = '';
+          $('password').value = ''; renderNetworks(); if (entry.secure) $('password').focus();
+        });
+        $('networks').append(row);
+      }
+      controls();
+    }
+    async function api(path, body) {
+      const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 4500);
+      try {
+        const response = await fetch('/api/' + path, { method: body === undefined ? 'GET' : 'POST', cache: 'no-store', signal: controller.signal,
+          ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
+        if (!response.ok) throw new Error(String(response.status)); return await response.json();
+      } finally { clearTimeout(timeout); }
+    }
+    async function scan() {
+      if (busy || success || scanning) return;
+      scanning = true; controls();
+      try { await api('scan', {}); }
+      catch { scanning = false; message('扫描请求失败', '请检查设备热点连接后重试', 'error', 'alert'); controls(); }
+    }
+    $('refresh-button').addEventListener('click', scan);
+    $('ssid').addEventListener('input', () => { selected = $('ssid').value; renderNetworks(); });
+    $('toggle-password').addEventListener('click', () => {
+      const visible = $('password').type === 'password'; $('password').type = visible ? 'text' : 'password';
+      $('toggle-password').setAttribute('aria-pressed', String(visible));
+      for (const attr of ['title', 'aria-label']) $('toggle-password').setAttribute(attr, visible ? '隐藏密码' : '显示密码');
+    });
+    $('form').addEventListener('submit', async event => {
+      event.preventDefault(); if (busy || success) return;
+      const ssid = $('ssid').value, password = $('password').value;
+      if (!ssid || encoder.encode(ssid).length > 32) { $('error').textContent = 'Wi-Fi 名称需要为 1–32 字节'; return; }
+      const bytes = encoder.encode(password).length;
+      if (bytes !== 0 && (bytes < 8 || bytes > 63) && !/^[0-9a-fA-F]{64}$/.test(password)) {
+        $('error').textContent = '密码需要为 8–63 字节，开放网络可留空'; return;
+      }
+      busy = submitting = true; $('error').textContent = ''; controls();
+      message('正在连接 Wi-Fi', ssid, 'busy', 'refresh');
+      try { await api('config', { ssid, password }); }
+      catch { busy = false; $('error').textContent = '提交失败，请检查热点连接后重试'; controls(); }
+      finally { submitting = false; }
+    });
+    async function poll() {
+      try {
+        const status = await api('status'); failures = 0;
+        if (!submitting) {
+          if (status.state === 'connecting') { busy = true; message('正在连接 Wi-Fi', '请稍候，正在验证网络连接', 'busy', 'refresh'); }
+          else if (['connected', 'synced', 'time_failed'].includes(status.state)) {
+            success = true; busy = false; $('password').value = '';
+            message('配网成功', status.state === 'time_failed' ? '时间校准未完成，12 小时后重试' : status.state === 'synced' ? '时间已校准，设备即将关闭热点' : 'Wi-Fi 已保存，正在校准时间', '', 'check');
+            $('footer-state').textContent = 'Wi-Fi 已保存';
+          } else if (status.state === 'connect_failed') { busy = false; message('连接失败', '检查 Wi-Fi 名称与密码后重新提交', 'error', 'alert'); }
+          else if (status.state === 'save_failed') { busy = false; message('保存失败', '凭据未保存，请在设备上重新开启配网', 'error', 'alert'); }
+          else if (status.state === 'scan_failed') message('扫描失败', '可以刷新或手工输入 Wi-Fi 名称', 'error', 'alert');
+        }
+        if (!busy && !success) {
+          const result = await api('networks'); scanning = result.scanning; entries = result.networks; renderNetworks();
+        }
+        controls();
+      } catch {
+        if (++failures >= 3) {
+          scanning = busy = false; controls();
+          if (success) { message('配网成功', '设备已关闭热点，可返回原 Wi-Fi 网络', '', 'check'); $('footer-state').textContent = '热点已关闭'; }
+          else { message('设备连接已断开', '热点可能已超时，请在设备上双击重新配网', 'error', 'alert'); $('footer-state').textContent = '连接已断开'; }
+        }
+      }
+      if (!(success && failures >= 3)) setTimeout(poll, 750);
+    }
+    poll();
+  </script>
+</body>
+</html>
